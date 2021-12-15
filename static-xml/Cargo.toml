@@ -1,0 +1,20 @@
+[package]
+name = "static-xml"
+version = "0.1.0"
+edition = "2021"
+readme = "../README.md"
+repository = "https://github.com/scottlamb/static-xml/"
+license = "MIT/Apache-2.0"
+keywords = ["serde", "xml", "serialization"]
+categories = ["encoding"]
+description = "serde-like serialization and deserialization of static Rust types in XML"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4.14"
+xml-rs = "0.8.4"
+
+[dev-dependencies]
+assert_matches = "1.5.0"
+env_logger = "0.9.0"

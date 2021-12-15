@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "test-suite",
+    "static-xml",
+    "static-xml-derive",
+]
