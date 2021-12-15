@@ -13,15 +13,14 @@ fn visitor_field_definitions(struct_: &ElementStruct) -> Vec<TokenStream> {
     struct_
         .fields
         .iter()
-        .map(|field| {
-            let field_name = field.inner.ident.as_ref().unwrap();
-            let ty = &field.inner.ty;
+        .filter_map(|field| {
+            let span = field.inner.span();
+            let field_present = format_ident!("{}_present", &field.inner.ident.as_ref().unwrap());
             match field.mode {
-                ElementFieldMode::Text => quote! { _text_buf: String },
-                _ => {
-                    let trait_ = field.mode.quote_deserialize_trait();
-                    quote_spanned! { field.inner.span() => #field_name: <#ty as #trait_>::Builder }
-                }
+                ElementFieldMode::Text => None,
+                _ => Some(quote_spanned! {span=>
+                    #field_present: bool
+                }),
             }
         })
         .collect()
@@ -31,52 +30,41 @@ fn visitor_initializers(struct_: &ElementStruct) -> Vec<TokenStream> {
     struct_
         .fields
         .iter()
-        .map(|field| {
-            let field_name = field.inner.ident.as_ref().unwrap();
-            let ty = &field.inner.ty;
+        .filter_map(|field| {
+            let span = field.inner.span();
+            let field_present = format_ident!("{}_present", &field.inner.ident.as_ref().unwrap());
             match field.mode {
-                ElementFieldMode::Text => quote! { _text_buf: String::new() },
-                _ => {
-                    let trait_ = field.mode.quote_deserialize_trait();
-                    quote_spanned! {
-                        field.inner.span() => #field_name: <#ty as #trait_>::init()
-                    }
-                }
+                ElementFieldMode::Text => None,
+                _ => Some(quote_spanned! {span=>
+                    #field_present: false
+                }),
             }
         })
         .collect()
 }
 
-fn value_fields_from_visitor(struct_: &ElementStruct) -> Vec<TokenStream> {
-    struct_.fields.iter().map(|field| {
-        let field_name = field.inner.ident.as_ref().unwrap();
+fn finalize_visitor_fields(struct_: &ElementStruct) -> Vec<TokenStream> {
+    struct_.fields.iter().filter_map(|field| {
+        let span = field.inner.span();
+        let field_present = format_ident!("{}_present", &field.inner.ident.as_ref().unwrap());
         let ty = &field.inner.ty;
-        let default = if field.default {
-            quote! { Some(Default::default) }
-        } else {
-            quote! { None }
-        };
         match field.mode {
-            ElementFieldMode::Element { sorted_elements_pos: p } => {
-                quote_spanned! {
-                    field.inner.span() => #field_name: <#ty as ::static_xml::de::DeserializeField>::finalize(self.#field_name, &ELEMENTS[#p], #default)?
-                }
+            ElementFieldMode::Element { sorted_elements_pos: p } if !field.default => {
+                Some(quote_spanned! {span=>
+                    <#ty as ::static_xml::de::DeserializeField>::finalize(self.#field_present, &ELEMENTS[#p])?;
+                })
             }
-            ElementFieldMode::Attribute { sorted_attributes_pos: p } => {
-                quote_spanned! {
-                    field.inner.span() => #field_name: <#ty as ::static_xml::de::DeserializeAttr>::finalize(self.#field_name, &ATTRIBUTES[#p], #default)?
-                }
+            ElementFieldMode::Attribute { sorted_attributes_pos: p } if !field.default => {
+                Some(quote_spanned! {span=>
+                    <#ty as ::static_xml::de::DeserializeAttr>::finalize(self.#field_present, &ATTRIBUTES[#p])?;
+                })
             }
-            ElementFieldMode::Flatten => {
-                quote_spanned! {
-                    field.inner.span() => #field_name: <#ty as ::static_xml::de::DeserializeFlatten>::finalize(self.#field_name)?
-                }
-            }
-            ElementFieldMode::Text => {
-                quote_spanned! {
-                    field.inner.span() => #field_name: <#ty as ::static_xml::de::ParseText>::parse(self._text_buf)?
-                }
-            }
+            /*ElementFieldMode::Flatten if !field.default => {
+                Some(quote_spanned! {span=>
+                    <#ty as ::static_xml::de::DeserializeFlatten>::finalize(self.#field_present)?;
+                })
+            }*/
+            _ => None
         }
     }).collect()
 }
@@ -104,10 +92,11 @@ fn attribute_match_branches(struct_: &ElementStruct) -> Vec<TokenStream> {
         .enumerate()
         .map(|(i, &p)| {
             let field = &struct_.fields[p];
+            let field_present = format_ident!("{}_present", &field.inner.ident.as_ref().unwrap());
             let ident = field.inner.ident.as_ref().unwrap();
             quote! {
                 Some(#i) => {
-                    ::static_xml::de::DeserializeAttrBuilder::attr(&mut self.#ident, name, value)?;
+                    ::static_xml::de::DeserializeAttr::attr(&mut self.out.#ident, &mut self.#field_present, name, value)?;
                     Ok(None)
                 }
             }
@@ -122,11 +111,12 @@ fn element_match_branches(struct_: &ElementStruct) -> Vec<TokenStream> {
         .enumerate()
         .map(|(i, &p)| {
             let field = &struct_.fields[p];
+            let field_present = format_ident!("{}_present", &field.inner.ident.as_ref().unwrap());
             let ident = field.inner.ident.as_ref().unwrap();
             let span = ident.span();
             quote_spanned! {span=>
                 Some(#i) => {
-                    ::static_xml::de::DeserializeFieldBuilder::element(&mut self.#ident, child)?;
+                    ::static_xml::de::DeserializeField::element(&mut self.out.#ident, &mut self.#field_present, child)?;
                     return Ok(None)
                 }
             }
@@ -142,67 +132,30 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
 
     let ident = &struct_.input.ident;
     let (impl_generics, ty_generics, where_clause) = struct_.input.generics.split_for_impl();
-    let (visitor_type, visitor_defs, finalize, self_asserts);
-    if struct_.attr.direct {
-        visitor_type = struct_.input.ident.clone();
-        visitor_defs = struct_
-            .fields
-            .iter()
-            .filter_map(|f| {
-                let fident = f.inner.ident.as_ref().unwrap();
-                let span = fident.span();
-                let ty = &f.inner.ty;
-                let assert_ident = format_ident!("{}_{}_Assertion", ident, fident);
-                let trait_ = match f.mode {
-                    ElementFieldMode::Attribute { .. } => {
-                        quote! { ::static_xml::de::DeserializeAttrBuilder }
-                    }
-                    ElementFieldMode::Element { .. } => {
-                        quote! { ::static_xml::de::DeserializeFieldBuilder }
-                    }
-                    _ => return None,
-                };
-                Some(quote_spanned! {span=>
-                    // https://docs.rs/quote/1.0.10/quote/macro.quote_spanned.html#example
-                    #[allow(non_camel_case_types)]
-                    struct #assert_ident where #ty: #trait_;
-                })
-            })
-            .collect();
-        finalize = quote! { Ok(builder) };
-        let assert_ident = format_ident!("{}_Assertion", ident);
-        self_asserts = quote_spanned! {ident.span()=>
-            // https://docs.rs/quote/1.0.10/quote/macro.quote_spanned.html#example
-            #[allow(non_camel_case_types)]
-            struct #assert_ident where #ident: Default;
-        };
-    } else {
-        visitor_type = format_ident!("{}Visitor", &struct_.input.ident);
-        let visitor_field_definitions = visitor_field_definitions(&struct_);
-        let visitor_initializers = visitor_initializers(&struct_);
-        let value_fields_from_visitor = value_fields_from_visitor(&struct_);
-        visitor_defs = quote! {
-            pub struct #visitor_type {
-                #(#visitor_field_definitions, )*
-            };
+    let visitor_type = format_ident!("{}Visitor", &struct_.input.ident);
+    let visitor_field_definitions = visitor_field_definitions(&struct_);
+    let visitor_initializers = visitor_initializers(&struct_);
+    let finalize_visitor_fields = finalize_visitor_fields(&struct_);
+    let visitor_defs = quote! {
+        pub struct #visitor_type<'out> {
+            out: &'out mut #ident,
+            #(#visitor_field_definitions, )*
+        }
 
-            impl Default for #visitor_type {
-                fn default() -> Self {
-                    Self {
-                        #(#visitor_initializers, )*
-                    }
+        impl<'out> #visitor_type<'out> {
+            fn new(out: &'out mut #ident) -> Self {
+                Self {
+                    out,
+                    #(#visitor_initializers, )*
                 }
             }
 
-            impl #visitor_type {
-                fn finalize(self) -> Result<#ident, ::static_xml::de::VisitorError> {
-                    Ok(#ident { #(#value_fields_from_visitor, )* })
-                }
+            fn finalize(self) -> Result<(), ::static_xml::de::VisitorError> {
+                #(#finalize_visitor_fields)*
+                Ok(())
             }
-        };
-        finalize = quote! { builder.finalize() };
-        self_asserts = TokenStream::new();
-    }
+        }
+    };
     let flatten_fields = struct_.quote_flatten_fields();
     let (attribute_fallthrough, element_fallthrough);
     if flatten_fields.is_empty() {
@@ -236,10 +189,9 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
         const ATTRIBUTES: &[::static_xml::ExpandedNameRef] = &[#(#attributes,)*];
         const ELEMENTS: &[::static_xml::ExpandedNameRef] = &[#(#elements,)*];
 
-        #self_asserts;
-        #visitor_defs;
+        #visitor_defs
 
-        impl ::static_xml::de::ElementVisitor for #visitor_type {
+        impl<'out> ::static_xml::de::ElementVisitor for #visitor_type<'out> {
             fn element<'a>(
                 &mut self,
                 child: ::static_xml::de::ElementReader<'a>,
@@ -269,13 +221,15 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
             fn deserialize(
                 element: ::static_xml::de::ElementReader<'_>,
             ) -> Result<Self, ::static_xml::de::VisitorError> {
-                let mut builder = #visitor_type::default();
+                let mut out = <#ident as Default>::default();
+                let mut builder = #visitor_type::new(&mut out);
                 element.read_to(&mut builder)?;
-                #finalize
+                builder.finalize()?;
+                Ok(out)
             }
         }
 
-        impl #impl_generics ::static_xml::de::DeserializeFlatten for #ident #ty_generics
+        /*impl #impl_generics ::static_xml::de::DeserializeFlatten for #ident #ty_generics
         #where_clause {
             type Builder = #visitor_type;
 
@@ -286,11 +240,11 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
             fn finalize(builder: Self::Builder) -> Result<Self, ::static_xml::de::VisitorError> {
                 #finalize
             }
-        }
+        }*/
     }
 }
 
-fn do_enum_indirect(enum_: &ElementEnum) -> TokenStream {
+/*fn do_enum_indirect(enum_: &ElementEnum) -> TokenStream {
     let ident = &enum_.input.ident;
     let elements: Vec<_> = enum_
         .variants
@@ -426,7 +380,7 @@ fn do_enum_indirect(enum_: &ElementEnum) -> TokenStream {
         // can't derive DeserializeFlatten for Option<#ident> and Vec<#ident> because of the
         // orphan rule. :-(
     }
-}
+}*/
 
 fn do_enum_direct(enum_: &ElementEnum) -> TokenStream {
     let ident = &enum_.input.ident;
@@ -449,13 +403,10 @@ fn do_enum_direct(enum_: &ElementEnum) -> TokenStream {
                 Some(ty) => {
                     quote_spanned! {
                         vident.span() => Some(#i) => {
-                            let mut builder = <#ty as ::static_xml::de::DeserializeField>::init();
-                            ::static_xml::de::DeserializeFieldBuilder::element(&mut builder, child)?;
-                            *self = #ident::#vident(<#ty as ::static_xml::de::DeserializeField>::finalize(
-                                builder,
-                                &ELEMENTS[#i], // unused?
-                                Some(|| unreachable!()),
-                            )?);
+                            let mut builder = <#ty as Default>::default();
+                            let mut present = false;
+                            ::static_xml::de::DeserializeField::element(&mut builder, &mut present, child)?;
+                            *self = #ident::#vident(builder);
                         }
                     }
                 }
@@ -506,11 +457,11 @@ pub(crate) fn derive(errors: &Errors, input: syn::DeriveInput) -> Result<TokenSt
     match input.data {
         Data::Enum(ref data) => {
             let enum_ = ElementEnum::new(&errors, &input, data);
-            if enum_.attr.direct {
+            //if enum_.attr.direct {
                 Ok(do_enum_direct(&enum_))
-            } else {
-                Ok(do_enum_indirect(&enum_))
-            }
+            //} else {
+            //    Ok(do_enum_indirect(&enum_))
+            //}
         }
         Data::Struct(ref data) => ElementStruct::new(&errors, &input, data).map(|s| do_struct(&s)),
         _ => {

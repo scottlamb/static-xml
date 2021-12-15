@@ -477,7 +477,7 @@ impl<'a> ElementStruct<'a> {
             .filter_map(|f| {
                 if matches!(f.mode, ElementFieldMode::Flatten) {
                     let ident = &f.inner.ident;
-                    Some(quote_spanned! { f.inner.ident.span() => &mut self.#ident })
+                    Some(quote_spanned! { f.inner.ident.span() => &mut self.out.#ident })
                 } else {
                     None
                 }

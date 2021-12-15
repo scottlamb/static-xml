@@ -8,8 +8,8 @@ use static_xml_derive::{Deserialize, Serialize};
 struct DirectHolder {
     #[static_xml(flatten)]
     direct_enum: DirectEnum,
-    #[static_xml(flatten)]
-    other_flatten: OtherDirectFlatten,
+    //#[static_xml(flatten)]
+    //other_flatten: OtherDirectFlatten,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -33,12 +33,12 @@ struct OtherDirectFlatten {
     field: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 struct IndirectHolder {
     #[static_xml(flatten)]
     indirect_enum: IndirectEnum,
-    #[static_xml(flatten)]
-    other_flatten: OtherIndirectFlatten,
+    //#[static_xml(flatten)]
+    //other_flatten: OtherIndirectFlatten,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -50,8 +50,13 @@ enum IndirectEnum {
     #[static_xml(skip)]
     Skipped,
 }
+impl Default for IndirectEnum {
+    fn default() -> Self {
+        IndirectEnum::Skipped
+    }
+}
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 struct OtherIndirectFlatten {
     field: Vec<String>,
 }
@@ -74,9 +79,9 @@ fn deserialize_indirect_simple() {
         indirect,
         IndirectHolder {
             indirect_enum: IndirectEnum::Simple("asdf".to_owned()),
-            other_flatten: OtherIndirectFlatten {
+            /*other_flatten: OtherIndirectFlatten {
                 field: vec!["before".to_owned(), "after".to_owned()]
-            },
+            },*/
         }
     );
 }
@@ -100,9 +105,9 @@ fn deserialize_indirect_vec() {
         indirect,
         IndirectHolder {
             indirect_enum: IndirectEnum::Vec(vec!["foo".to_owned(), "bar".to_owned()]),
-            other_flatten: OtherIndirectFlatten {
+            /*other_flatten: OtherIndirectFlatten {
                 field: vec!["before".to_owned(), "after".to_owned()]
-            },
+            },*/
         }
     );
 }
