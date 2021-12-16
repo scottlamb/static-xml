@@ -6,7 +6,7 @@ use std::{cell::RefCell, collections::BTreeMap};
 use proc_macro2::TokenStream;
 use quote::{quote, quote_spanned, ToTokens};
 use static_xml::{de::WhiteSpace, ExpandedNameRef};
-use syn::{spanned::Spanned, DeriveInput, Fields, Lit, LitStr, Meta, MetaNameValue, NestedMeta};
+use syn::{DeriveInput, Fields, Lit, LitStr, Meta, MetaNameValue, NestedMeta};
 
 // See serde/serde_derive/src/internals/attr.rs and yaserde_derive/src/common/field.rs
 
@@ -213,7 +213,6 @@ pub(crate) enum TextVariantMode {
 pub(crate) struct ElementAttr<'a> {
     pub(crate) name: Name<'a>,
     pub(crate) namespaces: Namespaces,
-    pub(crate) direct: bool,
     // TODO: rename_all.
 }
 
@@ -346,7 +345,6 @@ impl<'a> ElementAttr<'a> {
         let mut name = Name::from_ident(&input.ident);
         let mut namespaces = Namespaces::default();
         let mut prefix_nv = None;
-        let mut direct = false;
         for item in get_meta_items(errors, &input.attrs) {
             match item {
                 NestedMeta::Meta(Meta::NameValue(nv)) => {
@@ -367,28 +365,13 @@ impl<'a> ElementAttr<'a> {
                         errors.push(syn::Error::new_spanned(nv, "item not understood"));
                     }
                 }
-                NestedMeta::Meta(Meta::Path(p)) => {
-                    if let Some(id) = p.get_ident() {
-                        if id == "direct" {
-                            direct = true;
-                        } else {
-                            errors.push(syn::Error::new_spanned(p, "item not understood"));
-                        }
-                    } else {
-                        errors.push(syn::Error::new_spanned(p, "item not understood"));
-                    }
-                }
                 i => errors.push(syn::Error::new_spanned(i, "item not understood")),
             }
         }
         if let Some(ref nv) = prefix_nv {
             namespaces.process_prefix(errors, nv, &mut name);
         }
-        ElementAttr {
-            name,
-            namespaces,
-            direct,
-        }
+        ElementAttr { name, namespaces }
     }
 }
 
@@ -470,20 +453,6 @@ impl<'a> ElementStruct<'a> {
             text_field_pos,
         })
     }
-
-    pub(crate) fn quote_flatten_fields(&self) -> Vec<TokenStream> {
-        self.fields
-            .iter()
-            .filter_map(|f| {
-                if matches!(f.mode, ElementFieldMode::Flatten) {
-                    let ident = &f.inner.ident;
-                    Some(quote_spanned! { f.inner.ident.span() => &mut self.out.#ident })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
 }
 
 const STATIC_XML: &str = "static_xml";
@@ -517,20 +486,10 @@ pub(crate) enum ElementFieldMode {
     Flatten,
 }
 
-impl ElementFieldMode {
-    pub(crate) fn quote_deserialize_trait(self) -> TokenStream {
-        match self {
-            ElementFieldMode::Element { .. } => quote! { ::static_xml::de::DeserializeField },
-            ElementFieldMode::Attribute { .. } => quote! { ::static_xml::de::DeserializeAttr },
-            ElementFieldMode::Text => panic!("text is different"),
-            ElementFieldMode::Flatten => quote! { ::static_xml::de::DeserializeFlatten },
-        }
-    }
-}
-
 /// Field within an `ElementStruct`.
 pub(crate) struct ElementField<'a> {
     pub(crate) inner: &'a syn::Field,
+    pub(crate) ident: &'a syn::Ident,
     pub(crate) mode: ElementFieldMode,
     pub(crate) default: bool,
     pub(crate) name: Name<'a>,
@@ -543,8 +502,8 @@ impl<'a> ElementField<'a> {
         let mut default = false;
         let mut flatten = false;
         let mut text = false;
-        let mut name =
-            Name::from_ident(inner.ident.as_ref().expect("struct fields should be named"));
+        let ident = inner.ident.as_ref().expect("struct fields should be named");
+        let mut name = Name::from_ident(ident);
         for item in get_meta_items(errors, &inner.attrs) {
             match &item {
                 NestedMeta::Meta(Meta::Path(p)) if p.is_ident("attribute") => attribute = true,
@@ -595,6 +554,7 @@ impl<'a> ElementField<'a> {
         };
         Ok(ElementField {
             inner,
+            ident,
             default,
             mode,
             name,

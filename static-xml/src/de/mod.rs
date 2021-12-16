@@ -3,8 +3,8 @@
 
 //! Deserialization from XML to Rust types.
 
-use std::fmt::Write;
 use std::sync::Arc;
+use std::{fmt::Write, mem::MaybeUninit};
 
 use log::trace;
 use xml::{
@@ -49,6 +49,16 @@ impl VisitorError {
         Self::Wrap(Box::new(SimpleError(format!(
             "Missing expected attribute {}",
             expected
+        ))))
+    }
+
+    // xml-rs might detect this anyway, but static-xml-derive shouldn't rely
+    // on that for avoiding memory leaks, and it needs an error to return.
+    #[doc(hidden)]
+    pub fn duplicate_attribute(attribute: &ExpandedNameRef) -> Self {
+        Self::Wrap(Box::new(SimpleError(format!(
+            "Duplicate attribute {}",
+            attribute
         ))))
     }
 
@@ -662,7 +672,7 @@ pub trait Deserialize: Sized {
 ///
 /// Typically used only via derive macros.
 ///
-/// For any `T` that implements [`Deserialize`,, there are three implementations
+/// For any `T` that implements [`Deserialize`], there are three implementations
 /// of this trait:
 ///
 /// 1. `T`, for mandatory singleton fields. In XML Schema terms, this
@@ -671,25 +681,131 @@ pub trait Deserialize: Sized {
 ///    `minOccurs="0" maxOccurs="1".
 /// 3. `Vec<T>`, for repeated fields. In XML Schema terms,
 ///    `minOccurs="0" maxOccurs="unbounded"`.
-pub trait DeserializeField: Default {
-    /// Handles a single occurrence of this element; called zero or more times.
-    fn element<'a>(&mut self, present: &mut bool, element: ElementReader<'_>) -> Result<(), VisitorError>;
+pub trait DeserializeElementField: Sized {
+    /// Called on the first occurrence of this field's element within the parent.
+    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError>;
 
-    fn finalize(
-        present: bool,
-        expected: &ExpandedNameRef<'_>,
-    ) -> Result<(), VisitorError>;
+    /// Called on subsequent occurrences of this field's element within the parent.
+    ///
+    /// `self` was previously returned by `init` and has been through zero or more prior `update` calls.
+    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError>;
+
+    /// Called iff this field's element was not found within the parent.
+    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError>;
 }
 
-/// Deserializes this type when "flattened" into another.
+/// Deserializes an attribute into a field.
+///
+/// This is implemented via [`ParseText`] as noted there.
+pub trait DeserializeAttrField: Sized {
+    /// Called iff this field's attribute was found within the parent.
+    fn init(value: String) -> Result<Self, VisitorError>;
+
+    /// Called iff this field's attribute was not found within the parent.
+    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError>;
+}
+
+#[doc(hidden)]
+pub unsafe trait RawDeserializeVisitor<'out>: Sized + ElementVisitor {
+    type Out;
+
+    /// Returns a visitor that can be used to populate `this`.
+    fn new(out: &'out mut MaybeUninit<Self::Out>) -> Self;
+
+    /// Finalizes `out`.
+    ///
+    /// An `Ok` return guarantees `out.assume_init()` is valid.
+    fn finalize(self, default: Option<fn() -> Self::Out>) -> Result<(), VisitorError>;
+}
+
+/// Raw, unsafe implementation of [`Deserialize`], for use by the macros.
 ///
 /// With `static-xml-derive`, this can be used via `#[static_xml(flatten)]`.
-pub trait DeserializeFlatten: Sized {
-    type Builder: ElementVisitor;
-
-    fn init() -> Self::Builder;
-    fn finalize(builder: Self::Builder) -> Result<Self, VisitorError>;
+///
+/// Implementing this type automatically implements `Deserialize`.
+#[doc(hidden)]
+pub trait RawDeserialize<'out>: Sized {
+    type Visitor: RawDeserializeVisitor<'out, Out = Self>;
 }
+
+/*
+/// Raw, unsafe implementation of [`Deserialize`].
+#[doc(hidden)]
+pub unsafe trait RawDeserialize<'out>: Sized {
+    type Visitor: ElementVisitor;
+
+    /// Returns a visitor that can be used to populate `this`.
+    fn new(out: &'out mut MaybeUninit<Self>) -> Self::Visitor;
+
+    /// Finalizes `out`.
+    ///
+    /// An `Ok` return guarantees `out.assume_init()` is valid.
+    fn finalize(visitor: Self::Visitor, default: Option<fn() -> Self>) -> Result<(), VisitorError>;
+}
+*/
+
+/*
+impl<'a, T: RawDeserialize<'a>> Deserialize for T {
+    fn deserialize(element: ElementReader<'_>) -> Result<Self, VisitorError> {
+        let mut out = ::std::mem::MaybeUninit::uninit();
+        let mut visitor = Self::Visitor::new(&mut out);
+        element.read_to(&mut visitor)?;
+        visitor.finalize()?;
+        // SAFETY: finalize()'s contract guarantees this `assume_init` is safe.
+        Ok(unsafe {
+            out.assume_init()
+        })
+    }
+}
+*/
+
+/// Implements [`Deserialize`] via [`RawDeserializeVisitor`].
+///
+/// The type opts into [`Deserialize`] via this macro rather than by
+/// implementing a (hypothetical) `RawDeserialize`. The latter approach
+/// doesn't work because `impl<T: RawDeserialize> Deserialize for T` and
+/// `impl<T: ParseText> Deserialize for T` would
+/// [conflict](https://doc.rust-lang.org/error-index.html#E0119).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_deserialize_via_raw {
+    ( $t:ident, $visitor:ident ) => {
+        impl ::static_xml::de::Deserialize for $t {
+            fn deserialize(
+                element: ::static_xml::de::ElementReader<'_>,
+            ) -> Result<Self, ::static_xml::de::VisitorError> {
+                let mut out = ::std::mem::MaybeUninit::uninit();
+                let mut visitor =
+                    <$visitor as ::static_xml::de::RawDeserializeVisitor>::new(&mut out);
+                element.read_to(&mut visitor)?;
+                ::static_xml::de::RawDeserializeVisitor::finalize(visitor, None)?;
+                // SAFETY: finalize's contract guarantees assume_init is safe.
+                Ok(unsafe { out.assume_init() })
+            }
+        }
+    };
+}
+
+/*
+#[doc(hidden)]
+#[macro_export]
+macro_rules! impl_deserialize_via_raw {
+    ( $t:ident ) => {
+        impl Deserialize for $t {
+            fn deserialize(element: ElementReader<'_>) -> Result<Self, VisitorError> {
+                let mut out = ::std::mem::MaybeUninit::uninit();
+                let mut visitor = Self::Visitor::new(&mut out);
+                element.read_to(&mut visitor)?;
+                visitor.finalize()?;
+                // SAFETY: finalize()'s contract guarantees this `assume_init` is safe.
+                Ok(unsafe {
+                    out.assume_init()
+                })
+            }
+        }
+    };
+}
+*/
 
 /// Deserializes text data, whether character nodes or attribute values.
 ///
@@ -706,24 +822,6 @@ pub trait ParseText: Sized {
     ///
     /// The caller can use [`normalize`] as desired.
     fn parse(text: String) -> Result<Self, crate::BoxedStdError>;
-}
-
-/// Deserializes an attribute into a field.
-///
-/// This is implemented via [`ParseText`] as noted there.
-pub trait DeserializeAttr: Sized {
-    /// May be called zero or one time with the relevant attribute.
-    fn attr(
-        &mut self,
-        present: &mut bool,
-        name: &ExpandedNameRef,
-        value: String,
-    ) -> Result<(), VisitorError>;
-
-    fn finalize(
-        present: bool,
-        expected: &ExpandedNameRef<'_>,
-    ) -> Result<(), VisitorError>;
 }
 
 /// Visitor used within [`Deserialize`].
@@ -908,103 +1006,201 @@ pub fn find(name: &ExpandedNameRef<'_>, sorted_slice: &[ExpandedNameRef<'_>]) ->
     sorted_slice.binary_search(name).ok()
 }
 
-impl<T: Deserialize + Default> DeserializeField for T {
-    fn element<'a>(&mut self, present: &mut bool, element: ElementReader<'_>) -> Result<(), VisitorError> {
-        if *present {
-            return Err(VisitorError::duplicate_element(&element.expanded_name()));
-        }
-        *self = T::deserialize(element)?;
-        *present = true;
-        Ok(())
+impl<T: Deserialize> DeserializeElementField for T {
+    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError> {
+        T::deserialize(element)
     }
 
-    fn finalize(
-        present: bool,
-        expected: &ExpandedNameRef<'_>,
-    ) -> Result<(), VisitorError> {
-        if !present {
-            return Err(VisitorError::missing_element(expected));
-        }
-        Ok(())
+    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError> {
+        Err(VisitorError::duplicate_element(&element.expanded_name()))
+    }
+
+    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
+        Err(VisitorError::missing_element(expected))
     }
 }
 
-impl<T: Deserialize> DeserializeField for Option<T> {
-    fn element<'a>(&mut self, present: &mut bool, element: ElementReader<'_>) -> Result<(), VisitorError> {
-        if *present {
-            return Err(VisitorError::duplicate_element(&element.expanded_name()));
-        }
-        *self = Some(T::deserialize(element)?);
-        *present = true;
-        Ok(())
+impl<T: Deserialize> DeserializeElementField for Option<T> {
+    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError> {
+        T::deserialize(element).map(Some)
     }
 
-    fn finalize(
-        _present: bool,
-        _expected: &ExpandedNameRef<'_>,
-    ) -> Result<(), VisitorError> {
-        Ok(())
+    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError> {
+        Err(VisitorError::duplicate_element(&element.expanded_name()))
+    }
+
+    fn missing(_expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
+        Ok(None)
     }
 }
 
 /// Deserializes into a `Vec`, adding an element.
-impl<T: Deserialize> DeserializeField for Vec<T> {
-    fn element<'a>(&mut self, present: &mut bool, element: ElementReader<'_>) -> Result<(), VisitorError> {
+impl<T: Deserialize> DeserializeElementField for Vec<T> {
+    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError> {
+        Ok(vec![T::deserialize(element)?])
+    }
+
+    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError> {
         self.push(T::deserialize(element)?);
-        *present = true;
         Ok(())
     }
 
-    fn finalize(
-        _present: bool,
-        _expected: &ExpandedNameRef<'_>,
-    ) -> Result<(), VisitorError> {
-        Ok(())
+    fn missing(_expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
+        Ok(Vec::new())
     }
 }
 
-impl<T: ParseText> DeserializeAttr for T {
-    fn attr(
-        &mut self,
-        present: &mut bool,
-        _name: &ExpandedNameRef,
-        value: String,
-    ) -> Result<(), VisitorError> {
-        *self = T::parse(value).map_err(VisitorError::Wrap)?;
-        *present = true;
-        Ok(())
+impl<T: ParseText> DeserializeAttrField for T {
+    fn init(value: String) -> Result<Self, VisitorError> {
+        Ok(T::parse(value).map_err(VisitorError::Wrap)?)
     }
 
-    fn finalize(
-        present: bool,
-        expected: &ExpandedNameRef<'_>,
-    ) -> Result<(), VisitorError> {
-        if !present {
-            return Err(VisitorError::missing_attribute(expected));
+    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
+        Err(VisitorError::missing_attribute(expected))
+    }
+}
+
+impl<T: ParseText> DeserializeAttrField for Option<T> {
+    fn init(value: String) -> Result<Self, VisitorError> {
+        Ok(Some(T::parse(value).map_err(VisitorError::Wrap)?))
+    }
+
+    fn missing(_expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
+        Ok(None)
+    }
+}
+
+/*
+#[doc(hidden)]
+pub enum SingleContainerResult<'a, T> {
+    Inited(T),
+    Pass(ElementReader<'a>),
+}
+
+/// A type which is initialized after a single child element.
+///
+/// `impl SingleChildElement for T` automatically implements [`Deserialize`]
+/// for `T`, `Option<T>`, and `Vec<T>`. This is particularly handy for flatten
+/// on `enum` types.
+#[doc(hidden)]
+pub trait SingleElementContainer {
+    fn element<'a>(child: ElementReader<'a>) -> Result<SingleContainerResult<Self>, VisitorError>;
+    fn missing() -> VisitorError;
+}
+
+impl<'out, T: SingleElementContainer> RawDeserialize<'out> for T {
+    type Visitor = RequiredVisitor<'out, T>;
+}
+
+struct RequiredVisitor<'out, T: SingleElementContainer> {
+    out: &'out mut MaybeUninit<T>,
+    initialized: bool,
+}
+
+// SAFETY: RequiredVisitor fulfills the contract of guaranteeing `out` is
+// initialized when `finalize` returns `Ok`.
+unsafe impl<'out, T: SingleElementContainer> RawDeserializeVisitor<'out> for RequiredVisitor<'out, T> {
+    type Out = T;
+
+    fn new(out: &'out mut MaybeUninit<Self::Out>) -> Self {
+        Self {
+            out,
+            initialized: false,
+        }
+    }
+
+    fn finalize(self, default: Option<fn() -> Self>) -> Result<(), VisitorError> {
+        match (self.initialized, default) {
+            (false, Some(d)) => {
+                self.out.write(d());
+                Ok(())
+            }
+            (false, None) => Err(T::missing()),
+            (true, _) => Ok(())
+        }
+    }
+}
+
+impl<'out, T: SingleElementContainer> ElementVisitor for RequiredVisitor<'out, T> {
+    fn element<'a>(
+        &mut self,
+        child: ElementReader<'a>,
+    ) -> Result<Option<ElementReader<'a>>, VisitorError> {
+        if self.initialized {
+            return Err(VisitorError::duplicate_element(child));
+        }
+        Ok(match SingleElementContainer::element(child)? {
+            SingleContainerResult::Inited(c) => {
+                self.out.write(c);
+                self.initialized = true;
+                None
+            }
+            SingleContainerResult::Pass(c) => Some(c),
+        })
+    }
+}
+
+impl<'out, T: SingleElementContainer> RawDeserialize<'out> for Option<T> {
+    type Visitor = OptionalVisitor<'out, T>;
+}
+
+struct OptionalVisitor<'out, T: SingleElementContainer>(&'out mut Option<T>);
+
+// SAFETY: OptionVisitor fulfills the contract of guaranteeing `out` is
+// initialized when `finalize` returns `Ok`. I expect writing `None` to be cheap
+// (in code size and CPU time), so it just does this immediately.
+unsafe impl<'out, T: SingleElementContainer> RawDeserializeVisitor<'out> for OptionalVisitor<'out, T> {
+    type Out = Option<T>;
+
+    fn new(out: &'out mut MaybeUninit<Self::Out>) -> Self {
+        Self(out.write(None))
+    }
+
+    fn finalize(self, default: Option<fn() -> Self>) -> Result<(), VisitorError> {
+        if let (None, Some(d)) = (self.out, default) {
+            self.out = Some(d());
         }
         Ok(())
     }
 }
 
-impl<T: ParseText> DeserializeAttr for Option<T> {
-    fn attr(
+impl<'out, T: SingleElementContainer> ElementVisitor for OptionalVisitor<'out, T> {
+    fn element<'a>(
         &mut self,
-        present: &mut bool,
-        _name: &ExpandedNameRef,
-        value: String,
-    ) -> Result<(), VisitorError> {
-        *self = Some(T::parse(value).map_err(VisitorError::Wrap)?);
-        *present = true;
-        Ok(())
+        child: ElementReader<'a>,
+    ) -> Result<Option<ElementReader<'a>>, VisitorError> {
+        if self.out.is_some() {
+            return Err(VisitorError::duplicate_element(child.name()));
+        }
+        *self.out = Some(T::deserialize(child)?);
+        Ok(None)
+    }
+}
+
+impl<'out, T: SingleElementContainer> RawDeserialize<'out> for Vec<T> {
+    type Visitor = MultiVisitor<'out, T>;
+}
+
+struct MultiVisitor<'out, T: SingleElementContainer>(&'out mut Vec<T>);
+
+// SAFETY: OptionVisitor fulfills the contract of guaranteeing `out` is
+// initialized when `finalize` returns `Ok`. I expect writing `None` to be cheap
+// (in code size and CPU time), so it just does this immediately.
+unsafe impl<'out, T: SingleElementContainer> RawDeserializeVisitor<'out> for MultiVisitor<'out, T> {
+    type Out = Vec<T>;
+
+    fn new(out: &'out mut MaybeUninit<Self::Out>) -> Self {
+        Self(out.write(Vec::new()))
     }
 
-    fn finalize(
-        _present: bool,
-        _expected: &ExpandedNameRef<'_>,
-    ) -> Result<(), VisitorError> {
+    fn finalize(self, default: Option<fn() -> Self>) -> Result<(), VisitorError> {
+        if let (true, Some(d)) = (self.out.is_empty(), default) {
+            *self.out = d();
+        }
         Ok(())
     }
 }
+*/
 
 impl ParseText for bool {
     fn parse(text: String) -> Result<Self, crate::BoxedStdError> {
@@ -1057,7 +1253,6 @@ impl<T: ParseText> Deserialize for T {
         T::parse(str).map_err(VisitorError::Wrap)
     }
 }
-
 /*#[cfg(test)]
 mod tests {
     use super::*;

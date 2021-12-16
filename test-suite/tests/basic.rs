@@ -18,7 +18,6 @@ struct Foo {
 
     //#[static_xml(flatten)]
     //bar: Bar,
-
     text: String,
 
     constrained: ConstrainedString,
