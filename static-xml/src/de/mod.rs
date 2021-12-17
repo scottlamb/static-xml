@@ -703,11 +703,11 @@ pub struct Field<'a> {
     pub ptr: *mut (),
     pub initialized: &'a mut bool,
 }
-impl<'a> Field<'a> {
+impl Field<'_> {
     /// Puts `val` into the place, panicking if it is full.
-    /// 
+    ///
     /// This is also available via vtables when `T` is not known at compile time.
-    /// 
+    ///
     /// SAFETY: Caller must guarantee accuracy of all arguments, and the lifetime 'a applies to ptr.
     pub unsafe fn push<T: Sized + 'static>(self, val: T) {
         match (self.field_type, *self.initialized) {
@@ -715,9 +715,10 @@ impl<'a> Field<'a> {
             (FieldType::Direct, false) => std::ptr::write(self.ptr as *mut T, val),
             (FieldType::Option, false) => std::ptr::write(self.ptr as *mut Option<T>, Some(val)),
             (FieldType::Vec, false) => {
-                let vec = (&mut *(self.ptr as *mut std::mem::MaybeUninit<Vec<T>>)).write(Vec::new());
+                let vec =
+                    (&mut *(self.ptr as *mut std::mem::MaybeUninit<Vec<T>>)).write(Vec::new());
                 vec.push(val);
-            },
+            }
             (FieldType::Vec, true) => {
                 let vec = &mut *(self.ptr as *mut Vec<T>);
                 vec.push(val);
@@ -726,7 +727,7 @@ impl<'a> Field<'a> {
         *self.initialized = true;
     }
 
-    // SAFETY: caller must guarantee accuracy of all arguments. 
+    // SAFETY: caller must guarantee accuracy of all arguments.
     // default_fn must return a value of the field type (not the value type).
     pub unsafe fn finalize<T: Sized + 'static>(
         self,
@@ -783,10 +784,15 @@ pub enum FieldType {
 pub type ParseFn = unsafe fn(field: Field<'_>, text: String) -> Result<(), crate::BoxedStdError>;
 
 #[doc(hidden)]
-pub type DeserializeFn = unsafe fn(field: Field<'_>, child: ElementReader<'_>) -> Result<(), VisitorError>;
+pub type DeserializeFn =
+    unsafe fn(field: Field<'_>, child: ElementReader<'_>) -> Result<(), VisitorError>;
 
 #[doc(hidden)]
-pub type FinalizeFn = unsafe fn(field: Field<'_>, default_fn: Option<&()>, err_fn: &dyn Fn() -> VisitorError) -> Result<(), VisitorError>;
+pub type FinalizeFn = unsafe fn(
+    field: Field<'_>,
+    default_fn: Option<&()>,
+    err_fn: &dyn Fn() -> VisitorError,
+) -> Result<(), VisitorError>;
 
 #[doc(hidden)]
 pub struct FieldVtable {
@@ -796,46 +802,71 @@ pub struct FieldVtable {
 
 #[doc(hidden)]
 pub enum FieldVtableType {
-    Text { // or simple?
+    Text {
+        // or simple?
         parse: Option<ParseFn>,
         // TODO: write.
     },
-    Element { // or complex?
+    Element {
+        // or complex?
         deserialize: Option<DeserializeFn>,
         // TODO: serialize.
     },
 }
 
 impl FieldVtable {
-    pub unsafe fn deserialize(&self, field: Field, child: ElementReader<'_>) -> Result<(), VisitorError> {
+    pub unsafe fn deserialize(
+        &self,
+        field: Field,
+        child: ElementReader<'_>,
+    ) -> Result<(), VisitorError> {
         if *field.initialized && matches!(field.field_type, FieldType::Direct | FieldType::Option) {
             return Err(VisitorError::duplicate_element(&child.expanded_name()));
         }
         match self {
-            FieldVtable { type_: FieldVtableType::Text { parse }, .. } => {
+            FieldVtable {
+                type_: FieldVtableType::Text { parse },
+                ..
+            } => {
                 let parse = parse.unwrap();
                 parse(field, child.read_string()?).map_err(VisitorError::Wrap)
             }
-            FieldVtable { type_: FieldVtableType::Element { deserialize }, .. } => {
+            FieldVtable {
+                type_: FieldVtableType::Element { deserialize },
+                ..
+            } => {
                 let deserialize = deserialize.unwrap();
                 deserialize(field, child)
             }
         }
     }
 
-    pub unsafe fn parse(&self, field: Field, name: &ExpandedNameRef, value: String) -> Result<(), VisitorError> {
-        debug_assert!(matches!(field.field_type, FieldType::Direct | FieldType::Option));
+    pub unsafe fn parse(
+        &self,
+        field: Field,
+        name: &ExpandedNameRef,
+        value: String,
+    ) -> Result<(), VisitorError> {
+        debug_assert!(matches!(
+            field.field_type,
+            FieldType::Direct | FieldType::Option
+        ));
         if *field.initialized {
             return Err(VisitorError::duplicate_attribute(name));
         }
         match self {
-            FieldVtable { type_: FieldVtableType::Text { parse }, .. } => {
+            FieldVtable {
+                type_: FieldVtableType::Text { parse },
+                ..
+            } => {
                 let parse = parse.unwrap();
                 parse(field, value).map_err(VisitorError::Wrap)
             }
-            FieldVtable { type_: FieldVtableType::Element { .. }, .. } => unreachable!(),
+            FieldVtable {
+                type_: FieldVtableType::Element { .. },
+                ..
+            } => unreachable!(),
         }
-
     }
 }
 
@@ -849,7 +880,10 @@ pub unsafe trait HasFieldVtable: 'static {
 macro_rules! text_vtables {
     ( $t:ident ) => {
         const _: () = {
-            unsafe fn parse(field: $crate::de::Field, text: String) -> Result<(), $crate::BoxedStdError> {
+            unsafe fn parse(
+                field: $crate::de::Field,
+                text: String,
+            ) -> Result<(), $crate::BoxedStdError> {
                 let val: $t = $crate::de::ParseText::parse(text)?;
                 field.push(val);
                 Ok(())
@@ -873,7 +907,7 @@ macro_rules! text_vtables {
             }
         };
         // TODO: likewise for attr, text.
-    }
+    };
 }
 
 #[doc(hidden)]
@@ -906,7 +940,7 @@ macro_rules! deserialize_vtable {
                 const VTABLE: &'static $crate::de::FieldVtable = &VTABLE;
             }
         };
-    }
+    };
 }
 
 /// Deserializes an attribute into a field.
@@ -1259,14 +1293,12 @@ macro_rules! element_field {
                     field_type: FieldType::$field_type,
                     initialized,
                 };
-                (T::VTABLE.finalize)(
-                    field,
-                    std::mem::transmute::<_, _>(default),
-                    &|| VisitorError::missing_element(expected),
-                )
+                (T::VTABLE.finalize)(field, std::mem::transmute::<_, _>(default), &|| {
+                    VisitorError::missing_element(expected)
+                })
             }
         }
-    }
+    };
 }
 element_field!(T, Direct);
 element_field!(Option<T>, Option);
@@ -1302,18 +1334,15 @@ macro_rules! attr_field {
                     field_type: FieldType::$field_type,
                     initialized,
                 };
-                (T::VTABLE.finalize)(
-                    field,
-                    std::mem::transmute::<_, _>(default),
-                    &|| VisitorError::missing_element(expected),
-                )
+                (T::VTABLE.finalize)(field, std::mem::transmute::<_, _>(default), &|| {
+                    VisitorError::missing_element(expected)
+                })
             }
         }
-    }
+    };
 }
 attr_field!(T, Direct);
 attr_field!(Option<T>, Option);
-
 
 /*
 #[doc(hidden)]
