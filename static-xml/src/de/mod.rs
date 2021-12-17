@@ -3,7 +3,6 @@
 
 //! Deserialization from XML to Rust types.
 
-//use std::any::TypeId;
 use std::sync::Arc;
 use std::{fmt::Write, mem::MaybeUninit};
 
@@ -700,7 +699,6 @@ pub trait DeserializeElementField: Sized {
 
 #[doc(hidden)]
 pub struct Field<'a> {
-    //pub value_type: TypeId,
     pub field_type: FieldType,
     pub ptr: *mut (),
     pub initialized: &'a mut bool,
@@ -712,7 +710,6 @@ impl<'a> Field<'a> {
     /// 
     /// SAFETY: Caller must guarantee accuracy of all arguments, and the lifetime 'a applies to ptr.
     pub unsafe fn push<T: Sized + 'static>(self, val: T) {
-        //assert_eq!(self.value_type, TypeId::of::<T>());
         match (self.field_type, *self.initialized) {
             (FieldType::Direct | FieldType::Option, true) => unreachable!(),
             (FieldType::Direct, false) => std::ptr::write(self.ptr as *mut T, val),
@@ -736,7 +733,6 @@ impl<'a> Field<'a> {
         default_fn: Option<&()>,
         err_fn: &dyn Fn() -> VisitorError,
     ) -> Result<(), VisitorError> {
-        //assert_eq!(self.value_type, TypeId::of::<T>());
         if !*self.initialized {
             if let Some(d) = default_fn {
                 match self.field_type {
@@ -782,16 +778,6 @@ pub enum FieldType {
     /// `Vec<T>`
     Vec,
 }
-
-/*impl FieldType {
-    fn id<T: 'static>(self) -> TypeId {
-        match self {
-            FieldType::Direct => TypeId::of::<T>(),
-            FieldType::Option => TypeId::of::<Option<T>>(),
-            FieldType::Vec => TypeId::of::<Vec<T>>(),
-        }
-    }
-}*/
 
 #[doc(hidden)]
 pub type ParseFn = unsafe fn(field: Field<'_>, text: String) -> Result<(), crate::BoxedStdError>;
@@ -1230,12 +1216,10 @@ macro_rules! element_field {
                 child: ElementReader<'_>,
             ) -> Result<(), VisitorError> {
                 let field = Field {
-                    //value_type: TypeId::of::<T>(),
                     ptr: field.as_mut_ptr() as *mut (),
                     field_type: FieldType::$field_type,
                     initialized,
                 };
-                //assert_eq!(TypeId::of::<$out_type>(), field.field_type.id::<T>());
                 T::VTABLE.deserialize(field, child)
             }
 
@@ -1247,7 +1231,6 @@ macro_rules! element_field {
                 default: Option<fn() -> Self>,
             ) -> Result<(), VisitorError> {
                 let field = Field {
-                    //value_type: TypeId::of::<T>(),
                     ptr: field.as_mut_ptr() as *mut (),
                     field_type: FieldType::$field_type,
                     initialized,
