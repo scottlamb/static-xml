@@ -682,7 +682,7 @@ pub trait Deserialize: Sized {
 /// 3. `Vec<T>`, for repeated fields. In XML Schema terms,
 ///    `minOccurs="0" maxOccurs="unbounded"`.
 #[doc(hidden)]
-pub trait DeserializeElementField: Sized {
+pub trait ElementField: Sized {
     unsafe fn element(
         field: &mut MaybeUninit<Self>,
         initialized: &mut bool,
@@ -789,13 +789,13 @@ pub type DeserializeFn = unsafe fn(field: Field<'_>, child: ElementReader<'_>) -
 pub type FinalizeFn = unsafe fn(field: Field<'_>, default_fn: Option<&()>, err_fn: &dyn Fn() -> VisitorError) -> Result<(), VisitorError>;
 
 #[doc(hidden)]
-pub struct ElementVtable {
-    pub type_: ElementVtableType,
+pub struct FieldVtable {
+    pub type_: FieldVtableType,
     pub finalize: FinalizeFn,
 }
 
 #[doc(hidden)]
-pub enum ElementVtableType {
+pub enum FieldVtableType {
     Text { // or simple?
         parse: Option<ParseFn>,
         // TODO: write.
@@ -806,27 +806,42 @@ pub enum ElementVtableType {
     },
 }
 
-impl ElementVtable {
+impl FieldVtable {
     pub unsafe fn deserialize(&self, field: Field, child: ElementReader<'_>) -> Result<(), VisitorError> {
         if *field.initialized && matches!(field.field_type, FieldType::Direct | FieldType::Option) {
             return Err(VisitorError::duplicate_element(&child.expanded_name()));
         }
         match self {
-            ElementVtable { type_: ElementVtableType::Text { parse }, .. } => {
+            FieldVtable { type_: FieldVtableType::Text { parse }, .. } => {
                 let parse = parse.unwrap();
                 parse(field, child.read_string()?).map_err(VisitorError::Wrap)
             }
-            ElementVtable { type_: ElementVtableType::Element { deserialize }, .. } => {
+            FieldVtable { type_: FieldVtableType::Element { deserialize }, .. } => {
                 let deserialize = deserialize.unwrap();
                 deserialize(field, child)
             }
         }
     }
+
+    pub unsafe fn parse(&self, field: Field, name: &ExpandedNameRef, value: String) -> Result<(), VisitorError> {
+        debug_assert!(matches!(field.field_type, FieldType::Direct | FieldType::Option));
+        if *field.initialized {
+            return Err(VisitorError::duplicate_attribute(name));
+        }
+        match self {
+            FieldVtable { type_: FieldVtableType::Text { parse }, .. } => {
+                let parse = parse.unwrap();
+                parse(field, value).map_err(VisitorError::Wrap)
+            }
+            FieldVtable { type_: FieldVtableType::Element { .. }, .. } => unreachable!(),
+        }
+
+    }
 }
 
 #[doc(hidden)]
-pub unsafe trait HasElementVtable: 'static {
-    const VTABLE: &'static ElementVtable;
+pub unsafe trait HasFieldVtable: 'static {
+    const VTABLE: &'static FieldVtable;
 }
 
 #[doc(hidden)]
@@ -846,15 +861,15 @@ macro_rules! text_vtables {
             ) -> Result<(), $crate::de::VisitorError> {
                 field.finalize::<$t>(default_fn, err_fn)
             }
-            const VTABLE: $crate::de::ElementVtable = $crate::de::ElementVtable {
-                type_: $crate::de::ElementVtableType::Text {
+            const VTABLE: $crate::de::FieldVtable = $crate::de::FieldVtable {
+                type_: $crate::de::FieldVtableType::Text {
                     // XXX: why isn't this working? https://github.com/rust-lang/rust/issues/39817
                     parse: Some(parse),
                 },
                 finalize,
             };
-            unsafe impl $crate::de::HasElementVtable for $t {
-                const VTABLE: &'static $crate::de::ElementVtable = &VTABLE;
+            unsafe impl $crate::de::HasFieldVtable for $t {
+                const VTABLE: &'static $crate::de::FieldVtable = &VTABLE;
             }
         };
         // TODO: likewise for attr, text.
@@ -881,14 +896,14 @@ macro_rules! deserialize_vtable {
             ) -> Result<(), $crate::de::VisitorError> {
                 field.finalize::<$t>(default_fn, err_fn)
             }
-            const VTABLE: $crate::de::ElementVtable = $crate::de::ElementVtable {
-                type_: $crate::de::ElementVtableType::Element {
+            const VTABLE: $crate::de::FieldVtable = $crate::de::FieldVtable {
+                type_: $crate::de::FieldVtableType::Element {
                     deserialize: Some(deserialize),
                 },
                 finalize,
             };
-            unsafe impl $crate::de::HasElementVtable for $t {
-                const VTABLE: &'static $crate::de::ElementVtable = &VTABLE;
+            unsafe impl $crate::de::HasFieldVtable for $t {
+                const VTABLE: &'static $crate::de::FieldVtable = &VTABLE;
             }
         };
     }
@@ -897,12 +912,21 @@ macro_rules! deserialize_vtable {
 /// Deserializes an attribute into a field.
 ///
 /// This is implemented via [`ParseText`] as noted there.
-pub trait DeserializeAttrField: Sized {
-    /// Called iff this field's attribute was found within the parent.
-    fn init(value: String) -> Result<Self, VisitorError>;
+#[doc(hidden)]
+pub trait AttrField: Sized {
+    unsafe fn attribute(
+        field: &mut MaybeUninit<Self>,
+        initialized: &mut bool,
+        name: &ExpandedNameRef<'_>,
+        value: String,
+    ) -> Result<(), VisitorError>;
 
-    /// Called iff this field's attribute was not found within the parent.
-    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError>;
+    unsafe fn finalize(
+        field: &mut MaybeUninit<Self>,
+        initialized: &mut bool,
+        expected: &ExpandedNameRef<'_>,
+        default: Option<fn() -> Self>,
+    ) -> Result<(), VisitorError>;
 }
 
 #[doc(hidden)]
@@ -1208,7 +1232,7 @@ pub fn find(name: &ExpandedNameRef<'_>, sorted_slice: &[ExpandedNameRef<'_>]) ->
 
 macro_rules! element_field {
     ( $out_type:ty, $field_type:ident ) => {
-        impl<T: HasElementVtable> DeserializeElementField for $out_type {
+        impl<T: HasFieldVtable + Deserialize> ElementField for $out_type {
             #[inline]
             unsafe fn element(
                 field: &mut MaybeUninit<Self>,
@@ -1248,25 +1272,48 @@ element_field!(T, Direct);
 element_field!(Option<T>, Option);
 element_field!(Vec<T>, Vec);
 
-impl<T: ParseText> DeserializeAttrField for T {
-    fn init(value: String) -> Result<Self, VisitorError> {
-        Ok(T::parse(value).map_err(VisitorError::Wrap)?)
-    }
+macro_rules! attr_field {
+    ( $out_type:ty, $field_type:ident ) => {
+        impl<T: HasFieldVtable + ParseText> AttrField for $out_type {
+            #[inline]
+            unsafe fn attribute(
+                field: &mut MaybeUninit<Self>,
+                initialized: &mut bool,
+                name: &ExpandedNameRef,
+                value: String,
+            ) -> Result<(), VisitorError> {
+                let field = Field {
+                    ptr: field.as_mut_ptr() as *mut (),
+                    field_type: FieldType::$field_type,
+                    initialized,
+                };
+                T::VTABLE.parse(field, name, value)
+            }
 
-    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
-        Err(VisitorError::missing_attribute(expected))
+            #[inline]
+            unsafe fn finalize(
+                field: &mut MaybeUninit<Self>,
+                initialized: &mut bool,
+                expected: &ExpandedNameRef<'_>,
+                default: Option<fn() -> Self>,
+            ) -> Result<(), VisitorError> {
+                let field = Field {
+                    ptr: field.as_mut_ptr() as *mut (),
+                    field_type: FieldType::$field_type,
+                    initialized,
+                };
+                (T::VTABLE.finalize)(
+                    field,
+                    std::mem::transmute::<_, _>(default),
+                    &|| VisitorError::missing_element(expected),
+                )
+            }
+        }
     }
 }
+attr_field!(T, Direct);
+attr_field!(Option<T>, Option);
 
-impl<T: ParseText> DeserializeAttrField for Option<T> {
-    fn init(value: String) -> Result<Self, VisitorError> {
-        Ok(Some(T::parse(value).map_err(VisitorError::Wrap)?))
-    }
-
-    fn missing(_expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
-        Ok(None)
-    }
-}
 
 /*
 #[doc(hidden)]
