@@ -3,6 +3,7 @@
 
 //! Deserialization from XML to Rust types.
 
+use std::any::TypeId;
 use std::sync::Arc;
 use std::{fmt::Write, mem::MaybeUninit};
 
@@ -681,17 +682,234 @@ pub trait Deserialize: Sized {
 ///    `minOccurs="0" maxOccurs="1".
 /// 3. `Vec<T>`, for repeated fields. In XML Schema terms,
 ///    `minOccurs="0" maxOccurs="unbounded"`.
+#[doc(hidden)]
 pub trait DeserializeElementField: Sized {
-    /// Called on the first occurrence of this field's element within the parent.
-    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError>;
+    unsafe fn element(
+        field: &mut MaybeUninit<Self>,
+        initialized: &mut bool,
+        child: ElementReader<'_>,
+    ) -> Result<(), VisitorError>;
 
-    /// Called on subsequent occurrences of this field's element within the parent.
-    ///
-    /// `self` was previously returned by `init` and has been through zero or more prior `update` calls.
-    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError>;
+    unsafe fn finalize(
+        field: &mut MaybeUninit<Self>,
+        initialized: &mut bool,
+        expected: &ExpandedNameRef<'_>,
+        default: Option<fn() -> Self>,
+    ) -> Result<(), VisitorError>;
+}
 
-    /// Called iff this field's element was not found within the parent.
-    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError>;
+#[doc(hidden)]
+pub struct Field<'a> {
+    pub value_type: TypeId,
+    pub field_type: FieldType,
+    pub ptr: *mut (),
+    pub initialized: &'a mut bool,
+}
+impl<'a> Field<'a> {
+    /// Puts `val` into the place, panicking if it is full.
+    /// 
+    /// This is also available via vtables when `T` is not known at compile time.
+    /// 
+    /// SAFETY: Caller must guarantee accuracy of all arguments, and the lifetime 'a applies to ptr.
+    pub unsafe fn push<T: Sized + 'static>(self, val: T) {
+        assert_eq!(self.value_type, TypeId::of::<T>());
+        match (self.field_type, *self.initialized) {
+            (FieldType::Direct | FieldType::Option, true) => unreachable!(),
+            (FieldType::Direct, false) => std::ptr::write(self.ptr as *mut T, val),
+            (FieldType::Option, false) => std::ptr::write(self.ptr as *mut Option<T>, Some(val)),
+            (FieldType::Vec, false) => {
+                let vec = (&mut *(self.ptr as *mut std::mem::MaybeUninit<Vec<T>>)).write(Vec::new());
+                vec.push(val);
+            },
+            (FieldType::Vec, true) => {
+                let vec = &mut *(self.ptr as *mut Vec<T>);
+                vec.push(val);
+            }
+        }
+        *self.initialized = true;
+    }
+
+    // SAFETY: caller must guarantee accuracy of all arguments. 
+    // default_fn must return a value of the field type (not the value type).
+    pub unsafe fn finalize<T: Sized + 'static>(
+        self,
+        default_fn: Option<&()>,
+        err_fn: &dyn Fn() -> VisitorError,
+    ) -> Result<(), VisitorError> {
+        assert_eq!(self.value_type, TypeId::of::<T>());
+        if !*self.initialized {
+            if let Some(d) = default_fn {
+                match self.field_type {
+                    FieldType::Direct => {
+                        std::ptr::write(
+                            self.ptr as *mut T,
+                            std::mem::transmute::<*const (), fn() -> T>(d)(),
+                        );
+                    }
+                    FieldType::Option => {
+                        std::ptr::write(
+                            self.ptr as *mut Option<T>,
+                            std::mem::transmute::<*const (), fn() -> Option<T>>(d)(),
+                        );
+                    }
+                    FieldType::Vec => {
+                        std::ptr::write(
+                            self.ptr as *mut Vec<T>,
+                            std::mem::transmute::<*const (), fn() -> Vec<T>>(d)(),
+                        );
+                    }
+                }
+            } else if matches!(self.field_type, FieldType::Vec) {
+                std::ptr::write(self.ptr as *mut Vec<T>, Vec::new());
+            } else {
+                return Err(err_fn());
+            }
+            *self.initialized = true;
+        }
+        Ok(())
+    }
+}
+
+#[doc(hidden)]
+#[derive(Copy, Clone)]
+pub enum FieldType {
+    /// `T`
+    Direct,
+
+    /// `Option<T>`
+    Option,
+
+    /// `Vec<T>`
+    Vec,
+}
+
+impl FieldType {
+    fn id<T: 'static>(self) -> TypeId {
+        match self {
+            FieldType::Direct => TypeId::of::<T>(),
+            FieldType::Option => TypeId::of::<Option<T>>(),
+            FieldType::Vec => TypeId::of::<Vec<T>>(),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub type ParseFn = unsafe fn(field: Field<'_>, text: String) -> Result<(), crate::BoxedStdError>;
+
+#[doc(hidden)]
+pub type DeserializeFn = unsafe fn(field: Field<'_>, child: ElementReader<'_>) -> Result<(), VisitorError>;
+
+#[doc(hidden)]
+pub type FinalizeFn = unsafe fn(field: Field<'_>, default_fn: Option<&()>, err_fn: &dyn Fn() -> VisitorError) -> Result<(), VisitorError>;
+
+#[doc(hidden)]
+pub struct ElementVtable {
+    pub type_: ElementVtableType,
+    pub finalize: FinalizeFn,
+}
+
+#[doc(hidden)]
+pub enum ElementVtableType {
+    Text { // or simple?
+        parse: Option<ParseFn>,
+        // TODO: write.
+    },
+    Element { // or complex?
+        deserialize: Option<DeserializeFn>,
+        // TODO: serialize.
+    },
+}
+
+impl ElementVtable {
+    pub unsafe fn deserialize(&self, field: Field, child: ElementReader<'_>) -> Result<(), VisitorError> {
+        if *field.initialized && matches!(field.field_type, FieldType::Direct | FieldType::Option) {
+            return Err(VisitorError::duplicate_element(&child.expanded_name()));
+        }
+        match self {
+            ElementVtable { type_: ElementVtableType::Text { parse }, .. } => {
+                let parse = parse.unwrap();
+                parse(field, child.read_string()?).map_err(VisitorError::Wrap)
+            }
+            ElementVtable { type_: ElementVtableType::Element { deserialize }, .. } => {
+                let deserialize = deserialize.unwrap();
+                deserialize(field, child)
+            }
+        }
+    }
+}
+
+#[doc(hidden)]
+pub unsafe trait HasElementVtable: 'static {
+    const VTABLE: &'static ElementVtable;
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! text_vtables {
+    ( $t:ident ) => {
+        const _: () = {
+            unsafe fn parse(field: $crate::de::Field, text: String) -> Result<(), $crate::BoxedStdError> {
+                let val: $t = $crate::de::ParseText::parse(text)?;
+                field.push(val);
+                Ok(())
+            }
+            unsafe fn finalize(
+                field: $crate::de::Field<'_>,
+                default_fn: Option<&()>,
+                err_fn: &dyn Fn() -> $crate::de::VisitorError,
+            ) -> Result<(), $crate::de::VisitorError> {
+                field.finalize::<$t>(default_fn, err_fn)
+            }
+            unsafe fn push(field: $crate::de::Field<'_>, val_fn: &()) {
+                let val_fn = *(val_fn as *const () as *const fn() -> $t);
+                field.push(val_fn())
+            }
+            const VTABLE: $crate::de::ElementVtable = $crate::de::ElementVtable {
+                type_: $crate::de::ElementVtableType::Text {
+                    // XXX: why isn't this working? https://github.com/rust-lang/rust/issues/39817
+                    parse: Some(parse),
+                },
+                finalize,
+            };
+            unsafe impl $crate::de::HasElementVtable for $t {
+                const VTABLE: &'static $crate::de::ElementVtable = &VTABLE;
+            }
+        };
+        // TODO: likewise for attr, text.
+    }
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! deserialize_vtable {
+    ( $t:ident ) => {
+        const _: () = {
+            unsafe fn deserialize(
+                field: $crate::de::Field,
+                child: $crate::de::ElementReader<'_>,
+            ) -> Result<(), $crate::de::VisitorError> {
+                let val: $t = $crate::de::Deserialize::deserialize(child)?;
+                field.push(val);
+                Ok(())
+            }
+            unsafe fn finalize(
+                field: $crate::de::Field<'_>,
+                default_fn: Option<&()>,
+                err_fn: &dyn Fn() -> $crate::de::VisitorError,
+            ) -> Result<(), $crate::de::VisitorError> {
+                field.finalize::<$t>(default_fn, err_fn)
+            }
+            const VTABLE: $crate::de::ElementVtable = $crate::de::ElementVtable {
+                type_: $crate::de::ElementVtableType::Element {
+                    deserialize: Some(deserialize),
+                },
+                finalize,
+            };
+            unsafe impl $crate::de::HasElementVtable for $t {
+                const VTABLE: &'static $crate::de::ElementVtable = &VTABLE;
+            }
+        };
+    }
 }
 
 /// Deserializes an attribute into a field.
@@ -1006,49 +1224,48 @@ pub fn find(name: &ExpandedNameRef<'_>, sorted_slice: &[ExpandedNameRef<'_>]) ->
     sorted_slice.binary_search(name).ok()
 }
 
-impl<T: Deserialize> DeserializeElementField for T {
-    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError> {
-        T::deserialize(element)
-    }
+macro_rules! element_field {
+    ( $out_type:ty, $field_type:ident ) => {
+        impl<T: HasElementVtable> DeserializeElementField for $out_type {
+            unsafe fn element(
+                field: &mut MaybeUninit<Self>,
+                initialized: &mut bool,
+                child: ElementReader<'_>,
+            ) -> Result<(), VisitorError> {
+                let field = Field {
+                    value_type: TypeId::of::<T>(),
+                    ptr: field.as_mut_ptr() as *mut (),
+                    field_type: FieldType::$field_type,
+                    initialized,
+                };
+                assert_eq!(TypeId::of::<$out_type>(), field.field_type.id::<T>());
+                T::VTABLE.deserialize(field, child)
+            }
 
-    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError> {
-        Err(VisitorError::duplicate_element(&element.expanded_name()))
-    }
-
-    fn missing(expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
-        Err(VisitorError::missing_element(expected))
+            unsafe fn finalize(
+                field: &mut MaybeUninit<Self>,
+                initialized: &mut bool,
+                expected: &ExpandedNameRef<'_>,
+                default: Option<fn() -> Self>,
+            ) -> Result<(), VisitorError> {
+                let field = Field {
+                    value_type: TypeId::of::<T>(),
+                    ptr: field.as_mut_ptr() as *mut (),
+                    field_type: FieldType::$field_type,
+                    initialized,
+                };
+                (T::VTABLE.finalize)(
+                    field,
+                    std::mem::transmute::<_, _>(default),
+                    &|| VisitorError::missing_element(expected),
+                )
+            }
+        }
     }
 }
-
-impl<T: Deserialize> DeserializeElementField for Option<T> {
-    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError> {
-        T::deserialize(element).map(Some)
-    }
-
-    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError> {
-        Err(VisitorError::duplicate_element(&element.expanded_name()))
-    }
-
-    fn missing(_expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
-        Ok(None)
-    }
-}
-
-/// Deserializes into a `Vec`, adding an element.
-impl<T: Deserialize> DeserializeElementField for Vec<T> {
-    fn init(element: ElementReader<'_>) -> Result<Self, VisitorError> {
-        Ok(vec![T::deserialize(element)?])
-    }
-
-    fn update(&mut self, element: ElementReader<'_>) -> Result<(), VisitorError> {
-        self.push(T::deserialize(element)?);
-        Ok(())
-    }
-
-    fn missing(_expected: &ExpandedNameRef<'_>) -> Result<Self, VisitorError> {
-        Ok(Vec::new())
-    }
-}
+element_field!(T, Direct);
+element_field!(Option<T>, Option);
+element_field!(Vec<T>, Vec);
 
 impl<T: ParseText> DeserializeAttrField for T {
     fn init(value: String) -> Result<Self, VisitorError> {
@@ -1216,6 +1433,7 @@ impl ParseText for bool {
         }
     }
 }
+text_vtables!(bool);
 
 macro_rules! text_for_num {
     ( $t:ident ) => {
@@ -1225,6 +1443,7 @@ macro_rules! text_for_num {
                 <$t as std::str::FromStr>::from_str(text).map_err(|e| Box::new(e).into())
             }
         }
+        text_vtables!($t);
     };
 }
 
@@ -1246,7 +1465,9 @@ impl ParseText for String {
         Ok(text)
     }
 }
+text_vtables!(String);
 
+// TODO: obsolete?
 impl<T: ParseText> Deserialize for T {
     fn deserialize(element: ElementReader<'_>) -> Result<Self, VisitorError> {
         let str = element.read_string()?;

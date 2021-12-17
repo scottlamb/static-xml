@@ -92,24 +92,28 @@ fn finalize_visitor_fields(struct_: &ElementStruct) -> Vec<TokenStream> {
         let span = field.inner.span();
         let ty = &field.inner.ty;
         let default = field.default.then(|| {
-            Some(quote_spanned! {span=>
+            quote_spanned! {span=>
                 <#ty as ::std::default::Default>::default
-            })
+            }
         });
         match field.mode {
             ElementFieldMode::Element { sorted_elements_pos: p } => {
                 let field_present = format_ident!("{}_present", field.ident);
                 let field_mut = field_mut(field);
-                let value = match default {
-                    Some(d) => quote! { #d() },
-                    None => quote_spanned! {span=>
-                        <#ty as ::static_xml::de::DeserializeElementField>::missing(&ELEMENTS[#p])?
-                    }
+                let d = if let Some(d) = default {
+                    quote! { Some(#d) }
+                } else {
+                    quote! { None }
                 };
                 quote_spanned! {span=>
-                    if !self.#field_present {
-                        // SAFETY: #field_mut is a valid pointer to uninitialized memory.
-                        unsafe { ::std::ptr::write(#field_mut as *mut #ty, #value) };
+                    // SAFETY: #field_mut and #field_present are valid/consistent.
+                    unsafe {
+                        ::static_xml::de::DeserializeElementField::finalize(
+                            &mut *(#field_mut as *mut ::std::mem::MaybeUninit<#ty>),
+                            &mut self.#field_present,
+                            &ELEMENTS[#p],
+                            #d,
+                        )?;
                     }
                 }
             }
@@ -197,25 +201,18 @@ fn element_match_branches(struct_: &ElementStruct) -> Vec<TokenStream> {
         .enumerate()
         .map(|(i, &p)| {
             let field = &struct_.fields[p];
+            let ty = &field.inner.ty;
             let span = field.inner.span();
             let field_present = format_ident!("{}_present", &field.ident);
             let field_mut = field_mut(field);
             quote_spanned! {span=>
-                Some(#i) if self.#field_present => {
-                    ::static_xml::de::DeserializeElementField::update(
-                        // SAFETY: the field is initialized when field_present is true.
-                        unsafe { &mut *#field_mut },
+                // SAFETY: #field_mut and #field_present are consistent/valid.
+                Some(#i) => unsafe {
+                    ::static_xml::de::DeserializeElementField::element(
+                        &mut *(#field_mut as *mut ::std::mem::MaybeUninit<#ty>),
+                        &mut self.#field_present,
                         child,
                     )?;
-                    Ok(None)
-                }
-                Some(#i) => unsafe {
-                    // SAFETY: #field_mut is a valid pointer to uninitialized memory.
-                    ::std::ptr::write(
-                        #field_mut,
-                        ::static_xml::de::DeserializeElementField::init(child)?,
-                    );
-                    self.#field_present = true;
                     Ok(None)
                 }
             }
@@ -317,7 +314,7 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
                 }
             }
 
-            fn finalize(self, _default: Option<fn() -> Self::Out>) -> Result<(), ::static_xml::de::VisitorError> {
+            fn finalize(mut self, _default: Option<fn() -> Self::Out>) -> Result<(), ::static_xml::de::VisitorError> {
                 // Note _default is currently unsupported for structs.
 
                 #(#finalize_visitor_fields)*
@@ -330,6 +327,7 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
         }
 
         ::static_xml::impl_deserialize_via_raw!(#ident, #visitor_type);
+        ::static_xml::deserialize_vtable!(#ident);
     }
 }
 
@@ -358,10 +356,17 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                         #ident::#vident => #i
                     }
                 }
-                Some(_) => {
+                Some(ty) => {
                     quote_spanned! {span=>
-                        #ident::#vident(f) if element_i == Some(#i) => {
-                            ::static_xml::de::DeserializeElementField::update(f, child)?;
+                        #ident::#vident(f) if element_i == Some(#i) => unsafe {
+                            // This is a bit silly when we already know it's
+                            // initialized, but it lets us reuse code.
+                            let mut initialized = true;
+                            ::static_xml::de::DeserializeElementField::element(
+                                std::mem::transmute::<&mut #ty, &mut std::mem::MaybeUninit<#ty>>(f),
+                                &mut initialized,
+                                child,
+                            )?;
                             return Ok(None);
                         }
                         #ident::#vident(_) => #i
@@ -382,10 +387,20 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                         vident.span() => Some(#i) => { #ident::#vident }
                     }
                 }
-                Some(_) => {
+                Some(ty) => {
                     quote_spanned! {
                         vident.span() => Some(#i) => {
-                            #ident::#vident(::static_xml::de::DeserializeElementField::init(child)?)
+                            #ident::#vident(unsafe {
+                                let mut value = ::std::mem::MaybeUninit::<#ty>::uninit();
+                                let mut initialized = false;
+                                ::static_xml::de::DeserializeElementField::element(
+                                    &mut value,
+                                    &mut initialized,
+                                    child
+                                )?;
+                                assert!(initialized);
+                                value.assume_init()
+                            })
                         }
                     }
                 }
@@ -460,6 +475,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                 Ok(())
             }
         }
+        ::static_xml::deserialize_vtable!(#ident);
 
         impl<'out> ::static_xml::de::RawDeserialize<'out> for #ident {
             type Visitor = #visitor_type<'out>;

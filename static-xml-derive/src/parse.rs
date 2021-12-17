@@ -53,6 +53,7 @@ fn do_union(enum_: &TextEnum, variants: &[UnionVariant]) -> TokenStream {
                 Err(::static_xml::de::union_error(stringify!(#ident), errors))
             }
         }
+        ::static_xml::text_vtables!(#ident);
     }
 }
 
@@ -91,6 +92,7 @@ fn do_restriction(
                 }
             }
         }
+        ::static_xml::text_vtables!(#ident);
     }
 }
 
