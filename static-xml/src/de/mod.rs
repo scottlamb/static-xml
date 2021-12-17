@@ -3,7 +3,7 @@
 
 //! Deserialization from XML to Rust types.
 
-use std::any::TypeId;
+//use std::any::TypeId;
 use std::sync::Arc;
 use std::{fmt::Write, mem::MaybeUninit};
 
@@ -700,7 +700,7 @@ pub trait DeserializeElementField: Sized {
 
 #[doc(hidden)]
 pub struct Field<'a> {
-    pub value_type: TypeId,
+    //pub value_type: TypeId,
     pub field_type: FieldType,
     pub ptr: *mut (),
     pub initialized: &'a mut bool,
@@ -712,7 +712,7 @@ impl<'a> Field<'a> {
     /// 
     /// SAFETY: Caller must guarantee accuracy of all arguments, and the lifetime 'a applies to ptr.
     pub unsafe fn push<T: Sized + 'static>(self, val: T) {
-        assert_eq!(self.value_type, TypeId::of::<T>());
+        //assert_eq!(self.value_type, TypeId::of::<T>());
         match (self.field_type, *self.initialized) {
             (FieldType::Direct | FieldType::Option, true) => unreachable!(),
             (FieldType::Direct, false) => std::ptr::write(self.ptr as *mut T, val),
@@ -736,7 +736,7 @@ impl<'a> Field<'a> {
         default_fn: Option<&()>,
         err_fn: &dyn Fn() -> VisitorError,
     ) -> Result<(), VisitorError> {
-        assert_eq!(self.value_type, TypeId::of::<T>());
+        //assert_eq!(self.value_type, TypeId::of::<T>());
         if !*self.initialized {
             if let Some(d) = default_fn {
                 match self.field_type {
@@ -783,7 +783,7 @@ pub enum FieldType {
     Vec,
 }
 
-impl FieldType {
+/*impl FieldType {
     fn id<T: 'static>(self) -> TypeId {
         match self {
             FieldType::Direct => TypeId::of::<T>(),
@@ -791,7 +791,7 @@ impl FieldType {
             FieldType::Vec => TypeId::of::<Vec<T>>(),
         }
     }
-}
+}*/
 
 #[doc(hidden)]
 pub type ParseFn = unsafe fn(field: Field<'_>, text: String) -> Result<(), crate::BoxedStdError>;
@@ -859,10 +859,6 @@ macro_rules! text_vtables {
                 err_fn: &dyn Fn() -> $crate::de::VisitorError,
             ) -> Result<(), $crate::de::VisitorError> {
                 field.finalize::<$t>(default_fn, err_fn)
-            }
-            unsafe fn push(field: $crate::de::Field<'_>, val_fn: &()) {
-                let val_fn = *(val_fn as *const () as *const fn() -> $t);
-                field.push(val_fn())
             }
             const VTABLE: $crate::de::ElementVtable = $crate::de::ElementVtable {
                 type_: $crate::de::ElementVtableType::Text {
@@ -1227,21 +1223,23 @@ pub fn find(name: &ExpandedNameRef<'_>, sorted_slice: &[ExpandedNameRef<'_>]) ->
 macro_rules! element_field {
     ( $out_type:ty, $field_type:ident ) => {
         impl<T: HasElementVtable> DeserializeElementField for $out_type {
+            #[inline]
             unsafe fn element(
                 field: &mut MaybeUninit<Self>,
                 initialized: &mut bool,
                 child: ElementReader<'_>,
             ) -> Result<(), VisitorError> {
                 let field = Field {
-                    value_type: TypeId::of::<T>(),
+                    //value_type: TypeId::of::<T>(),
                     ptr: field.as_mut_ptr() as *mut (),
                     field_type: FieldType::$field_type,
                     initialized,
                 };
-                assert_eq!(TypeId::of::<$out_type>(), field.field_type.id::<T>());
+                //assert_eq!(TypeId::of::<$out_type>(), field.field_type.id::<T>());
                 T::VTABLE.deserialize(field, child)
             }
 
+            #[inline]
             unsafe fn finalize(
                 field: &mut MaybeUninit<Self>,
                 initialized: &mut bool,
@@ -1249,7 +1247,7 @@ macro_rules! element_field {
                 default: Option<fn() -> Self>,
             ) -> Result<(), VisitorError> {
                 let field = Field {
-                    value_type: TypeId::of::<T>(),
+                    //value_type: TypeId::of::<T>(),
                     ptr: field.as_mut_ptr() as *mut (),
                     field_type: FieldType::$field_type,
                     initialized,
