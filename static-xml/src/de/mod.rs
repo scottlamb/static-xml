@@ -683,6 +683,9 @@ pub trait Deserialize: Sized {
 ///    `minOccurs="0" maxOccurs="unbounded"`.
 #[doc(hidden)]
 pub trait ElementField: Sized {
+    const TYPE: FieldType;
+    const VTABLE: &'static FieldVtable;
+
     unsafe fn element(
         field: &mut MaybeUninit<Self>,
         initialized: &mut bool,
@@ -693,7 +696,7 @@ pub trait ElementField: Sized {
         field: &mut MaybeUninit<Self>,
         initialized: &mut bool,
         expected: &ExpandedNameRef<'_>,
-        default: Option<fn() -> Self>,
+        default: *const(), // Option<fn() -> Self>,
     ) -> Result<(), VisitorError>;
 }
 
@@ -731,28 +734,28 @@ impl Field<'_> {
     // default_fn must return a value of the field type (not the value type).
     pub unsafe fn finalize<T: Sized + 'static>(
         self,
-        default_fn: Option<&()>,
+        default_fn: *const (), //Option<&()>,
         err_fn: &dyn Fn() -> VisitorError,
     ) -> Result<(), VisitorError> {
         if !*self.initialized {
-            if let Some(d) = default_fn {
+            if !default_fn.is_null() {
                 match self.field_type {
                     FieldType::Direct => {
                         std::ptr::write(
                             self.ptr as *mut T,
-                            std::mem::transmute::<*const (), fn() -> T>(d)(),
+                            std::mem::transmute::<*const (), fn() -> T>(default_fn)(),
                         );
                     }
                     FieldType::Option => {
                         std::ptr::write(
                             self.ptr as *mut Option<T>,
-                            std::mem::transmute::<*const (), fn() -> Option<T>>(d)(),
+                            std::mem::transmute::<*const (), fn() -> Option<T>>(default_fn)(),
                         );
                     }
                     FieldType::Vec => {
                         std::ptr::write(
                             self.ptr as *mut Vec<T>,
-                            std::mem::transmute::<*const (), fn() -> Vec<T>>(d)(),
+                            std::mem::transmute::<*const (), fn() -> Vec<T>>(default_fn)(),
                         );
                     }
                 }
@@ -767,8 +770,171 @@ impl Field<'_> {
     }
 }
 
+
+#[doc(hidden)]
+pub struct NamedField {
+    pub name: ExpandedNameRef<'static>,
+    pub field: ElementVtableField,
+}
+
+#[doc(hidden)]
+pub struct ElementVtable {
+    pub elements: &'static [NamedField],
+    pub attributes: &'static [NamedField],
+    pub text: Option<ElementVtableField>,
+}
+
+#[doc(hidden)]
+pub struct ElementVtableField {
+    pub offset: u32,
+    pub field_type: FieldType,
+    pub vtable: &'static FieldVtable,
+    pub default: *const (),
+}
+
+#[doc(hidden)]
+pub struct VtableVisitor<'out> {
+    out: *mut u8,
+    vtable: &'out ElementVtable,
+
+    // elements, then attributes, then text.
+    initialized: &'out mut [bool],
+    text_buf: &'out mut String,
+
+    // XXX: how will this lifetime work? ideas:
+    // * wrap VtableVisitor, create a new instance of it on every call
+    // * wrap VtableVisitor, do the delegate calls manually afterward
+    // * make this actually just a list of vtables and offsets, and instantiate
+    //   an ElementVisitor from each every time. (Seems promising but the details
+    //   elude me right now...)
+    // flatten_visitors: &'out mut [&'out mut dyn ElementVisitor],
+}
+
+impl<'out> VtableVisitor<'out> {
+    // create a new one on every call? otherwise flatten_visitors lifetime won't work.
+    #[inline]
+    pub unsafe fn new(
+        out: *mut u8,
+        vtable: &'out ElementVtable,
+        initialized: &'out mut [bool],
+        text_buf: &'out mut String,
+        //flatten_visitors: &'out mut [&'out mut dyn ElementVisitor],
+    ) -> Self {
+        Self {
+            out,
+            vtable,
+            initialized,
+            text_buf,
+            //flatten_visitors,
+        }
+    }
+
+    /// Finalizes all but the flattened fields.
+    pub fn finalize(&mut self) -> Result<(), VisitorError> {
+        unsafe {
+            let mut i = 0;
+            for nf in self.vtable.elements {
+                let field = Field {
+                    ptr: self.out.add(nf.field.offset as usize) as *mut (),
+                    field_type: nf.field.field_type,
+                    initialized: &mut self.initialized[i],
+                };
+                (nf.field.vtable.finalize)(
+                    field,
+                    nf.field.default,
+                    &|| VisitorError::missing_element(&nf.name),
+                )?;
+                i += 1;
+            }
+            for nf in self.vtable.attributes {
+                let field = Field {
+                    ptr: self.out.add(nf.field.offset as usize) as *mut (),
+                    field_type: nf.field.field_type,
+                    initialized: &mut self.initialized[i],
+                };
+                (nf.field.vtable.finalize)(
+                    field,
+                    nf.field.default,
+                    &|| VisitorError::missing_attribute(&nf.name),
+                )?;
+                i += 1;
+            }
+            if let Some(text) = &self.vtable.text {
+                let field = Field {
+                    ptr: self.out.add(text.offset as usize) as *mut (),
+                    field_type: text.field_type,
+                    initialized: &mut self.initialized[i],
+                };
+                (text.vtable.finalize)(
+                    field,
+                    text.default,
+                    &|| panic!("missing text; does this even make sense?"),
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'out> ElementVisitor for VtableVisitor<'out> {
+    fn attribute(
+        &mut self,
+        name: &ExpandedNameRef<'_>,
+        value: String,
+    ) -> Result<Option<String>, VisitorError> {
+        let field_i = match my_find(name, self.vtable.attributes) {
+            Some(i) => i,
+            None => return Ok(Some(value)),
+        };
+        let vtable_field = &self.vtable.attributes[field_i].field;
+        unsafe {
+            let field = Field {
+                ptr: self.out.add(vtable_field.offset as usize) as *mut (),
+                field_type: vtable_field.field_type,
+                initialized: &mut self.initialized[self.vtable.elements.len() + field_i],
+            };
+            vtable_field.vtable.parse(field, name, value)?;
+        }
+        Ok(None)
+    }
+
+    fn element<'a>(
+        &mut self,
+        child: ElementReader<'a>,
+    ) -> Result<Option<ElementReader<'a>>, VisitorError> {
+        let field_i = match my_find(&child.expanded_name(), self.vtable.elements) {
+            Some(i) => i,
+            None => return Ok(Some(child)),
+        };
+        let vtable_field = &self.vtable.elements[field_i].field;
+        unsafe {
+            let field = Field {
+                ptr: self.out.add(vtable_field.offset as usize) as *mut (),
+                field_type: vtable_field.field_type,
+                initialized: &mut self.initialized[field_i],
+            };
+            vtable_field.vtable.deserialize(field, child)?;
+        }
+        Ok(None)
+    }
+
+    fn characters(
+        &mut self,
+        s: String,
+        pos: TextPosition,
+    ) -> Result<Option<String>, crate::BoxedStdError> {
+        if self.vtable.text.is_some() {
+            self.text_buf.push_str(&s);
+            Ok(None)
+        } else {
+            Ok(Some(s)) //delegate_characters(self.flatten_visitors, s, pos)
+        }
+    }
+}
+
 #[doc(hidden)]
 #[derive(Copy, Clone)]
+#[repr(u8)]
 pub enum FieldType {
     /// `T`
     Direct,
@@ -790,7 +956,7 @@ pub type DeserializeFn =
 #[doc(hidden)]
 pub type FinalizeFn = unsafe fn(
     field: Field<'_>,
-    default_fn: Option<&()>,
+    default_fn: *const (),
     err_fn: &dyn Fn() -> VisitorError,
 ) -> Result<(), VisitorError>;
 
@@ -890,7 +1056,7 @@ macro_rules! text_vtables {
             }
             unsafe fn finalize(
                 field: $crate::de::Field<'_>,
-                default_fn: Option<&()>,
+                default_fn: *const (),
                 err_fn: &dyn Fn() -> $crate::de::VisitorError,
             ) -> Result<(), $crate::de::VisitorError> {
                 field.finalize::<$t>(default_fn, err_fn)
@@ -925,7 +1091,7 @@ macro_rules! deserialize_vtable {
             }
             unsafe fn finalize(
                 field: $crate::de::Field<'_>,
-                default_fn: Option<&()>,
+                default_fn: *const (),
                 err_fn: &dyn Fn() -> $crate::de::VisitorError,
             ) -> Result<(), $crate::de::VisitorError> {
                 field.finalize::<$t>(default_fn, err_fn)
@@ -948,19 +1114,16 @@ macro_rules! deserialize_vtable {
 /// This is implemented via [`ParseText`] as noted there.
 #[doc(hidden)]
 pub trait AttrField: Sized {
-    unsafe fn attribute(
-        field: &mut MaybeUninit<Self>,
-        initialized: &mut bool,
-        name: &ExpandedNameRef<'_>,
-        value: String,
-    ) -> Result<(), VisitorError>;
-
-    unsafe fn finalize(
-        field: &mut MaybeUninit<Self>,
-        initialized: &mut bool,
-        expected: &ExpandedNameRef<'_>,
-        default: Option<fn() -> Self>,
-    ) -> Result<(), VisitorError>;
+    const TYPE: FieldType;
+    const VTABLE: &'static FieldVtable;
+}
+impl<T: HasFieldVtable + ParseText> AttrField for T {
+    const TYPE: FieldType = FieldType::Direct;
+    const VTABLE: &'static FieldVtable = T::VTABLE;
+}
+impl<T: HasFieldVtable + ParseText> AttrField for Option<T> {
+    const TYPE: FieldType = FieldType::Option;
+    const VTABLE: &'static FieldVtable = T::VTABLE;
 }
 
 #[doc(hidden)]
@@ -1264,9 +1427,16 @@ pub fn find(name: &ExpandedNameRef<'_>, sorted_slice: &[ExpandedNameRef<'_>]) ->
     sorted_slice.binary_search(name).ok()
 }
 
+fn my_find(name: &ExpandedNameRef<'_>, sorted_slice: &[NamedField]) -> Option<usize> {
+    sorted_slice.binary_search_by_key(name, |nf| nf.name).ok()
+}
+
 macro_rules! element_field {
     ( $out_type:ty, $field_type:ident ) => {
         impl<T: HasFieldVtable + Deserialize> ElementField for $out_type {
+            const TYPE: FieldType = FieldType::$field_type;
+            const VTABLE: &'static FieldVtable = T::VTABLE;
+
             #[inline]
             unsafe fn element(
                 field: &mut MaybeUninit<Self>,
@@ -1286,7 +1456,7 @@ macro_rules! element_field {
                 field: &mut MaybeUninit<Self>,
                 initialized: &mut bool,
                 expected: &ExpandedNameRef<'_>,
-                default: Option<fn() -> Self>,
+                default: *const (), //Option<fn() -> Self>,
             ) -> Result<(), VisitorError> {
                 let field = Field {
                     ptr: field.as_mut_ptr() as *mut (),
@@ -1303,46 +1473,6 @@ macro_rules! element_field {
 element_field!(T, Direct);
 element_field!(Option<T>, Option);
 element_field!(Vec<T>, Vec);
-
-macro_rules! attr_field {
-    ( $out_type:ty, $field_type:ident ) => {
-        impl<T: HasFieldVtable + ParseText> AttrField for $out_type {
-            #[inline]
-            unsafe fn attribute(
-                field: &mut MaybeUninit<Self>,
-                initialized: &mut bool,
-                name: &ExpandedNameRef,
-                value: String,
-            ) -> Result<(), VisitorError> {
-                let field = Field {
-                    ptr: field.as_mut_ptr() as *mut (),
-                    field_type: FieldType::$field_type,
-                    initialized,
-                };
-                T::VTABLE.parse(field, name, value)
-            }
-
-            #[inline]
-            unsafe fn finalize(
-                field: &mut MaybeUninit<Self>,
-                initialized: &mut bool,
-                expected: &ExpandedNameRef<'_>,
-                default: Option<fn() -> Self>,
-            ) -> Result<(), VisitorError> {
-                let field = Field {
-                    ptr: field.as_mut_ptr() as *mut (),
-                    field_type: FieldType::$field_type,
-                    initialized,
-                };
-                (T::VTABLE.finalize)(field, std::mem::transmute::<_, _>(default), &|| {
-                    VisitorError::missing_element(expected)
-                })
-            }
-        }
-    };
-}
-attr_field!(T, Direct);
-attr_field!(Option<T>, Option);
 
 /*
 #[doc(hidden)]

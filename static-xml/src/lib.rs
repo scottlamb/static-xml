@@ -11,6 +11,12 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 
 pub use xml::common::TextPosition;
 
+#[doc(hidden)]
+pub use memoffset::offset_of;
+
+#[doc(hidden)]
+pub use lazycell::AtomicLazyCell;
+
 /// A reference to an "expanded name": namespace and local name.
 ///
 /// See [Namespaces in XML 1.1 (Second Edition) section 2.1: Basic
