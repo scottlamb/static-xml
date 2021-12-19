@@ -1,8 +1,13 @@
 // Copyright (C) 2021 Scott Lamb <slamb@slamb.org>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#![feature(const_type_name)]
+
 pub mod de;
 pub mod ser;
+
+#[doc(hidden)]
+pub mod value;
 
 pub use de::read;
 pub use ser::{serialize, serialize_with_name};

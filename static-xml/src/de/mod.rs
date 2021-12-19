@@ -3,6 +3,8 @@
 
 //! Deserialization from XML to Rust types.
 
+mod store;
+
 use std::sync::Arc;
 use std::{fmt::Write, mem::MaybeUninit};
 
@@ -13,6 +15,9 @@ use xml::{
 };
 
 use crate::ExpandedNameRef;
+use crate::value::{Value, NamedField, Field, StructVtable};
+
+pub use self::store::ErasedStore;
 
 /// A single element in the XML stack; see [`Error::stack`].
 #[derive(Clone, Debug)]
@@ -24,7 +29,7 @@ pub struct StackElement {
     pub pos: TextPosition,
 }
 
-/// An error returned by an [`ElementVisitor`] impl or friends to `static-xml`.
+/// An error returned by an [`Visitor`] impl or friends to `static-xml`.
 ///
 /// This error is essentially an instruction to propagate an existing [`Error`]
 /// (which includes context information) or wrap a user-supplied
@@ -492,7 +497,7 @@ impl<R: std::io::Read> ErasedReader for Reader<R> {
 ///
 /// 1.  Construction: `ElementReader` is constructed within the `static-xml`
 ///     library and is passed to a [`Deserialize`] impl by [`read`] (the root)
-///     or to an [`ElementVisitor`] impl when reading the parent.
+///     or to an [`Visitor`] impl when reading the parent.
 /// 2.  Identification: [`ElementReader::name`] returns the name of the element
 ///     (including its namespace).
 /// 3.  Optional reading: see [`ElementReader::read_to`] and
@@ -545,7 +550,7 @@ impl<'a> ElementReader<'a> {
     /// `.map_err(VisitorError::Propagate)` to every call.
     pub fn read_to(
         mut self,
-        visitor: &mut dyn ElementVisitor,
+        visitor: &mut dyn Visitor,
     ) -> Result<
         (
             xml::name::OwnedName,
@@ -609,7 +614,7 @@ impl<'a> ElementReader<'a> {
     /// *TODO:* should this also return an error if there are attributes?
     /// XML Schema simple types do that, so we should probably match it?
     pub fn read_string(self) -> Result<String, VisitorError> {
-        // TODO: consider reimplementing via `impl ElementVisitor for String`.
+        // TODO: consider reimplementing via `impl Visitor for String`.
         // Might decrease this crate's code size.
         let mut out = String::new();
         loop {
@@ -652,11 +657,11 @@ impl<'a> ElementReader<'a> {
 ///     `static-xml-derive`'s `#[derive(ParseText)]`.
 ///
 /// It's occasionally useful to implement this manually, as the derive macros
-/// are not as flexible as the [`ElementVisitor`] interface. For example, they
+/// are not as flexible as the [`Visitor`] interface. For example, they
 /// don't support validating the order of child nodes.
 ///
 /// Manual implementations should place onto the program stack a builder
-/// which implements [`ElementVisitor`], then pass that visitor to
+/// which implements [`Visitor`], then pass that visitor to
 /// `ElementReader::read_to`.
 ///
 /// Note that while `deserialize` *can* retrieve the name of the element via
@@ -665,6 +670,7 @@ impl<'a> ElementReader<'a> {
 /// it's not done at all for root elements, although that should change as
 /// mentioned in [`read`].
 pub trait Deserialize: Sized {
+    // TODO: deserialize_into(element, field) instead?
     fn deserialize(element: ElementReader<'_>) -> Result<Self, VisitorError>;
 }
 
@@ -682,363 +688,120 @@ pub trait Deserialize: Sized {
 /// 3. `Vec<T>`, for repeated fields. In XML Schema terms,
 ///    `minOccurs="0" maxOccurs="unbounded"`.
 #[doc(hidden)]
-pub trait ElementField: Sized {
-    const TYPE: FieldType;
-    const VTABLE: &'static FieldVtable;
-
+pub trait ElementField: Field {
+    #[inline]
     unsafe fn element(
         field: &mut MaybeUninit<Self>,
         initialized: &mut bool,
         child: ElementReader<'_>,
-    ) -> Result<(), VisitorError>;
-
-    unsafe fn finalize(
-        field: &mut MaybeUninit<Self>,
-        initialized: &mut bool,
-        expected: &ExpandedNameRef<'_>,
-        default: *const(), // Option<fn() -> Self>,
-    ) -> Result<(), VisitorError>;
-}
-
-#[doc(hidden)]
-pub struct Field<'a> {
-    pub field_type: FieldType,
-    pub ptr: *mut (),
-    pub initialized: &'a mut bool,
-}
-impl Field<'_> {
-    /// Puts `val` into the place, panicking if it is full.
-    ///
-    /// This is also available via vtables when `T` is not known at compile time.
-    ///
-    /// SAFETY: Caller must guarantee accuracy of all arguments, and the lifetime 'a applies to ptr.
-    pub unsafe fn push<T: Sized + 'static>(self, val: T) {
-        match (self.field_type, *self.initialized) {
-            (FieldType::Direct | FieldType::Option, true) => unreachable!(),
-            (FieldType::Direct, false) => std::ptr::write(self.ptr as *mut T, val),
-            (FieldType::Option, false) => std::ptr::write(self.ptr as *mut Option<T>, Some(val)),
-            (FieldType::Vec, false) => {
-                let vec =
-                    (&mut *(self.ptr as *mut std::mem::MaybeUninit<Vec<T>>)).write(Vec::new());
-                vec.push(val);
-            }
-            (FieldType::Vec, true) => {
-                let vec = &mut *(self.ptr as *mut Vec<T>);
-                vec.push(val);
-            }
-        }
-        *self.initialized = true;
-    }
-
-    // SAFETY: caller must guarantee accuracy of all arguments.
-    // default_fn must return a value of the field type (not the value type).
-    pub unsafe fn finalize<T: Sized + 'static>(
-        self,
-        default_fn: *const (), //Option<&()>,
-        err_fn: &dyn Fn() -> VisitorError,
     ) -> Result<(), VisitorError> {
-        if !*self.initialized {
-            if !default_fn.is_null() {
-                match self.field_type {
-                    FieldType::Direct => {
-                        std::ptr::write(
-                            self.ptr as *mut T,
-                            std::mem::transmute::<*const (), fn() -> T>(default_fn)(),
-                        );
-                    }
-                    FieldType::Option => {
-                        std::ptr::write(
-                            self.ptr as *mut Option<T>,
-                            std::mem::transmute::<*const (), fn() -> Option<T>>(default_fn)(),
-                        );
-                    }
-                    FieldType::Vec => {
-                        std::ptr::write(
-                            self.ptr as *mut Vec<T>,
-                            std::mem::transmute::<*const (), fn() -> Vec<T>>(default_fn)(),
-                        );
-                    }
-                }
-            } else if matches!(self.field_type, FieldType::Vec) {
-                std::ptr::write(self.ptr as *mut Vec<T>, Vec::new());
-            } else {
-                return Err(err_fn());
-            }
-            *self.initialized = true;
-        }
-        Ok(())
-    }
-}
-
-
-#[doc(hidden)]
-pub struct NamedField {
-    pub name: ExpandedNameRef<'static>,
-    pub field: ElementVtableField,
-}
-
-#[doc(hidden)]
-pub struct ElementVtable {
-    pub elements: &'static [NamedField],
-    pub attributes: &'static [NamedField],
-    pub text: Option<ElementVtableField>,
-}
-
-#[doc(hidden)]
-pub struct ElementVtableField {
-    pub offset: u32,
-    pub field_type: FieldType,
-    pub vtable: &'static FieldVtable,
-    pub default: *const (),
-}
-
-#[doc(hidden)]
-pub struct VtableVisitor<'out> {
-    out: *mut u8,
-    vtable: &'out ElementVtable,
-
-    // elements, then attributes, then text.
-    initialized: &'out mut [bool],
-    text_buf: &'out mut String,
-
-    // XXX: how will this lifetime work? ideas:
-    // * wrap VtableVisitor, create a new instance of it on every call
-    // * wrap VtableVisitor, do the delegate calls manually afterward
-    // * make this actually just a list of vtables and offsets, and instantiate
-    //   an ElementVisitor from each every time. (Seems promising but the details
-    //   elude me right now...)
-    // flatten_visitors: &'out mut [&'out mut dyn ElementVisitor],
-}
-
-impl<'out> VtableVisitor<'out> {
-    // create a new one on every call? otherwise flatten_visitors lifetime won't work.
-    #[inline]
-    pub unsafe fn new(
-        out: *mut u8,
-        vtable: &'out ElementVtable,
-        initialized: &'out mut [bool],
-        text_buf: &'out mut String,
-        //flatten_visitors: &'out mut [&'out mut dyn ElementVisitor],
-    ) -> Self {
-        Self {
-            out,
-            vtable,
+        let field = ErasedStore::new(
+            <Self as Field>::Value::VTABLE,
+            &mut *(field.as_mut_ptr() as *mut ()),
+            <Self as Field>::KIND,
             initialized,
-            text_buf,
-            //flatten_visitors,
-        }
+        );
+
+        // TODO: enforce with trait `de` is `Some`, switch to unwrap_unchecked to reduce code size.
+        let de_vtable = <Self as Field>::Value::VTABLE.de.as_ref().unwrap();
+        de_vtable.kind.deserialize(field, child)
     }
 
-    /// Finalizes all but the flattened fields.
-    pub fn finalize(&mut self) -> Result<(), VisitorError> {
-        unsafe {
-            let mut i = 0;
-            for nf in self.vtable.elements {
-                let field = Field {
-                    ptr: self.out.add(nf.field.offset as usize) as *mut (),
-                    field_type: nf.field.field_type,
-                    initialized: &mut self.initialized[i],
-                };
-                (nf.field.vtable.finalize)(
-                    field,
-                    nf.field.default,
-                    &|| VisitorError::missing_element(&nf.name),
-                )?;
-                i += 1;
-            }
-            for nf in self.vtable.attributes {
-                let field = Field {
-                    ptr: self.out.add(nf.field.offset as usize) as *mut (),
-                    field_type: nf.field.field_type,
-                    initialized: &mut self.initialized[i],
-                };
-                (nf.field.vtable.finalize)(
-                    field,
-                    nf.field.default,
-                    &|| VisitorError::missing_attribute(&nf.name),
-                )?;
-                i += 1;
-            }
-            if let Some(text) = &self.vtable.text {
-                let field = Field {
-                    ptr: self.out.add(text.offset as usize) as *mut (),
-                    field_type: text.field_type,
-                    initialized: &mut self.initialized[i],
-                };
-                (text.vtable.finalize)(
-                    field,
-                    text.default,
-                    &|| panic!("missing text; does this even make sense?"),
-                )?;
-            }
-        }
-        Ok(())
+    #[inline]
+    unsafe fn finalize<'a>(
+        field: &'a mut MaybeUninit<Self>,
+        initialized: &'a mut bool,
+        expected: &ExpandedNameRef<'_>,
+        default: *const (), //Option<fn() -> Self>,
+    ) -> Result<(), VisitorError> {
+        let field = ErasedStore::new(
+            <Self as Field>::Value::VTABLE,
+            &mut *(field.as_mut_ptr() as *mut ()),
+            <Self as Field>::KIND,
+            initialized,
+        );
+
+        // TODO: enforce with trait `de` is `Some`, switch to unwrap_unchecked to reduce code size.
+        let de_vtable = <Self as Field>::Value::VTABLE.de.as_ref().unwrap_unchecked();
+        (de_vtable.finalize_field)(field, default, &|| {
+            VisitorError::missing_element(expected)
+        })
     }
 }
+impl<F, V> ElementField for F where F: Field<Value = V>, V: Deserialize {}
+//impl<F: FieldValue + Deserialize> ElementField for Field {
+//element_field!(T, Direct);
+//element_field!(Option<T>, Option);
+//element_field!(Vec<T>, Vec);
 
-impl<'out> ElementVisitor for VtableVisitor<'out> {
-    fn attribute(
-        &mut self,
-        name: &ExpandedNameRef<'_>,
-        value: String,
-    ) -> Result<Option<String>, VisitorError> {
-        let field_i = match my_find(name, self.vtable.attributes) {
-            Some(i) => i,
-            None => return Ok(Some(value)),
-        };
-        let vtable_field = &self.vtable.attributes[field_i].field;
-        unsafe {
-            let field = Field {
-                ptr: self.out.add(vtable_field.offset as usize) as *mut (),
-                field_type: vtable_field.field_type,
-                initialized: &mut self.initialized[self.vtable.elements.len() + field_i],
-            };
-            vtable_field.vtable.parse(field, name, value)?;
-        }
-        Ok(None)
-    }
-
-    fn element<'a>(
-        &mut self,
-        child: ElementReader<'a>,
-    ) -> Result<Option<ElementReader<'a>>, VisitorError> {
-        let field_i = match my_find(&child.expanded_name(), self.vtable.elements) {
-            Some(i) => i,
-            None => return Ok(Some(child)),
-        };
-        let vtable_field = &self.vtable.elements[field_i].field;
-        unsafe {
-            let field = Field {
-                ptr: self.out.add(vtable_field.offset as usize) as *mut (),
-                field_type: vtable_field.field_type,
-                initialized: &mut self.initialized[field_i],
-            };
-            vtable_field.vtable.deserialize(field, child)?;
-        }
-        Ok(None)
-    }
-
-    fn characters(
-        &mut self,
-        s: String,
-        pos: TextPosition,
-    ) -> Result<Option<String>, crate::BoxedStdError> {
-        if self.vtable.text.is_some() {
-            self.text_buf.push_str(&s);
-            Ok(None)
-        } else {
-            Ok(Some(s)) //delegate_characters(self.flatten_visitors, s, pos)
-        }
-    }
-}
-
+// TODO: make safe via ErasedStore checking type compatibility.
 #[doc(hidden)]
-#[derive(Copy, Clone)]
-#[repr(u8)]
-pub enum FieldType {
-    /// `T`
-    Direct,
+pub type ParseFn = unsafe fn(field: ErasedStore<'_>, text: String) -> Result<(), crate::BoxedStdError>;
 
-    /// `Option<T>`
-    Option,
-
-    /// `Vec<T>`
-    Vec,
-}
-
-#[doc(hidden)]
-pub type ParseFn = unsafe fn(field: Field<'_>, text: String) -> Result<(), crate::BoxedStdError>;
-
+// TODO: make safe via ErasedStore checking type compatibility.
 #[doc(hidden)]
 pub type DeserializeFn =
-    unsafe fn(field: Field<'_>, child: ElementReader<'_>) -> Result<(), VisitorError>;
+    unsafe fn(field: ErasedStore<'_>, child: ElementReader<'_>) -> Result<(), VisitorError>;
 
 #[doc(hidden)]
-pub type FinalizeFn = unsafe fn(
-    field: Field<'_>,
+pub type FinalizeFieldFn = unsafe fn(
+    field: ErasedStore<'_>,
     default_fn: *const (),
     err_fn: &dyn Fn() -> VisitorError,
 ) -> Result<(), VisitorError>;
 
+
+/// Portion of [`crate::ValueVtable`] for deserialization.
 #[doc(hidden)]
-pub struct FieldVtable {
-    pub type_: FieldVtableType,
-    pub finalize: FinalizeFn,
+pub struct Vtable {
+    kind: ValueKind,
+    finalize_field: FinalizeFieldFn,
 }
 
+// TODO: use tagged pointers to save a word per type?
+// (there are several bigger improvements we can make to StructVtable first though.)
 #[doc(hidden)]
-pub enum FieldVtableType {
-    Text {
-        // or simple?
-        parse: Option<ParseFn>,
-        // TODO: write.
-    },
-    Element {
-        // or complex?
-        deserialize: Option<DeserializeFn>,
-        // TODO: serialize.
-    },
+#[derive(Copy, Clone)]
+pub enum ValueKind {
+    StructVisitor(&'static StructVtable),
+    CustomVisitor(&'static RawDeserializeCustomVtable),
+    CustomDeserialize(&'static DeserializeFn),
+    Parse(ParseFn),
 }
 
-impl FieldVtable {
+impl ValueKind {
     pub unsafe fn deserialize(
         &self,
-        field: Field,
+        store: ErasedStore,
         child: ElementReader<'_>,
     ) -> Result<(), VisitorError> {
-        if *field.initialized && matches!(field.field_type, FieldType::Direct | FieldType::Option) {
+        if store.is_full() {
             return Err(VisitorError::duplicate_element(&child.expanded_name()));
         }
         match self {
-            FieldVtable {
-                type_: FieldVtableType::Text { parse },
-                ..
-            } => {
-                let parse = parse.unwrap();
-                parse(field, child.read_string()?).map_err(VisitorError::Wrap)
+            ValueKind::Parse(parse) => {
+                parse(store, child.read_string()?).map_err(VisitorError::Wrap)
             }
-            FieldVtable {
-                type_: FieldVtableType::Element { deserialize },
-                ..
-            } => {
-                let deserialize = deserialize.unwrap();
-                deserialize(field, child)
-            }
+            ValueKind::CustomDeserialize(deserialize) => deserialize(store, child),
+            ValueKind::StructVisitor(s) => (s.deserialize.unwrap())(store, child),
+            ValueKind::CustomVisitor(_) => todo!(),
         }
     }
 
     pub unsafe fn parse(
         &self,
-        field: Field,
+        field: ErasedStore,
         name: &ExpandedNameRef,
         value: String,
     ) -> Result<(), VisitorError> {
-        debug_assert!(matches!(
-            field.field_type,
-            FieldType::Direct | FieldType::Option
-        ));
-        if *field.initialized {
+        if field.is_full() {
             return Err(VisitorError::duplicate_attribute(name));
         }
         match self {
-            FieldVtable {
-                type_: FieldVtableType::Text { parse },
-                ..
-            } => {
-                let parse = parse.unwrap();
-                parse(field, value).map_err(VisitorError::Wrap)
-            }
-            FieldVtable {
-                type_: FieldVtableType::Element { .. },
-                ..
-            } => unreachable!(),
+            ValueKind::Parse(parse) => parse(field, value).map_err(VisitorError::Wrap),
+            _ => unreachable!(),
         }
     }
-}
-
-#[doc(hidden)]
-pub unsafe trait HasFieldVtable: 'static {
-    const VTABLE: &'static FieldVtable;
 }
 
 #[doc(hidden)]
@@ -1047,29 +810,28 @@ macro_rules! text_vtables {
     ( $t:ident ) => {
         const _: () = {
             unsafe fn parse(
-                field: $crate::de::Field,
+                store: $crate::de::ErasedStore,
                 text: String,
             ) -> Result<(), $crate::BoxedStdError> {
                 let val: $t = $crate::de::ParseText::parse(text)?;
-                field.push(val);
+                store.into_store().push(val);
                 Ok(())
             }
-            unsafe fn finalize(
-                field: $crate::de::Field<'_>,
+            unsafe fn finalize_field(
+                store: $crate::de::ErasedStore<'_>,
                 default_fn: *const (),
                 err_fn: &dyn Fn() -> $crate::de::VisitorError,
             ) -> Result<(), $crate::de::VisitorError> {
-                field.finalize::<$t>(default_fn, err_fn)
+                store.into_store::<$t>().finalize(default_fn, err_fn)
             }
-            const VTABLE: $crate::de::FieldVtable = $crate::de::FieldVtable {
-                type_: $crate::de::FieldVtableType::Text {
-                    // XXX: why isn't this working? https://github.com/rust-lang/rust/issues/39817
-                    parse: Some(parse),
-                },
-                finalize,
-            };
-            unsafe impl $crate::de::HasFieldVtable for $t {
-                const VTABLE: &'static $crate::de::FieldVtable = &VTABLE;
+            unsafe impl $crate::value::Value for $t {
+                const VTABLE: &'static $crate::value::ValueVtable = &$crate::value::ValueVtable {
+                    type_name: std::any::type_name::<$t>(),
+                    de: Some($crate::de::Vtable {
+                        kind: $crate::de::ValueKind::Parse(parse),
+                        finalize_field,
+                    }),
+                };
             }
         };
         // TODO: likewise for attr, text.
@@ -1078,32 +840,32 @@ macro_rules! text_vtables {
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! deserialize_vtable {
+macro_rules! custom_deserialize_vtable {
     ( $t:ident ) => {
         const _: () = {
             unsafe fn deserialize(
-                field: $crate::de::Field,
+                field: $crate::de::ErasedStore,
                 child: $crate::de::ElementReader<'_>,
             ) -> Result<(), $crate::de::VisitorError> {
                 let val: $t = $crate::de::Deserialize::deserialize(child)?;
                 field.push(val);
                 Ok(())
             }
-            unsafe fn finalize(
-                field: $crate::de::Field<'_>,
+            unsafe fn finalize_field(
+                field: $crate::de::ErasedStore<'_>,
                 default_fn: *const (),
                 err_fn: &dyn Fn() -> $crate::de::VisitorError,
             ) -> Result<(), $crate::de::VisitorError> {
-                field.finalize::<$t>(default_fn, err_fn)
+                field.into_store::<$t>().finalize(default_fn, err_fn)
             }
-            const VTABLE: $crate::de::FieldVtable = $crate::de::FieldVtable {
-                type_: $crate::de::FieldVtableType::Element {
-                    deserialize: Some(deserialize),
-                },
-                finalize,
-            };
-            unsafe impl $crate::de::HasFieldVtable for $t {
-                const VTABLE: &'static $crate::de::FieldVtable = &VTABLE;
+            unsafe impl $crate::value::Value for $t {
+                const VTABLE: &'static $crate::value::ValueVtable = &$crate::value::ValueVtable {
+                    type_name: std::any::type_name::<$t>(),
+                    de: Some($crate::de::Vtable {
+                        kind: $crate::de::ValueKind::CustomDeserialize(deserialize),
+                        finalize_field,
+                    }),
+                };
             }
         };
     };
@@ -1113,57 +875,334 @@ macro_rules! deserialize_vtable {
 ///
 /// This is implemented via [`ParseText`] as noted there.
 #[doc(hidden)]
-pub trait AttrField: Sized {
-    const TYPE: FieldType;
-    const VTABLE: &'static FieldVtable;
-}
-impl<T: HasFieldVtable + ParseText> AttrField for T {
-    const TYPE: FieldType = FieldType::Direct;
-    const VTABLE: &'static FieldVtable = T::VTABLE;
-}
-impl<T: HasFieldVtable + ParseText> AttrField for Option<T> {
-    const TYPE: FieldType = FieldType::Option;
-    const VTABLE: &'static FieldVtable = T::VTABLE;
-}
+pub trait AttrField: Field {}
+impl<T: Value + ParseText> AttrField for T {}
+impl<T: Value + ParseText> AttrField for Option<T> {}
 
-#[doc(hidden)]
-pub unsafe trait RawDeserializeVisitor<'out>: Sized + ElementVisitor {
-    type Out;
-
-    /// Returns a visitor that can be used to populate `this`.
-    fn new(out: &'out mut MaybeUninit<Self::Out>) -> Self;
-
-    /// Finalizes `out`.
-    ///
-    /// An `Ok` return guarantees `out.assume_init()` is valid.
-    fn finalize(self, default: Option<fn() -> Self::Out>) -> Result<(), VisitorError>;
-}
-
-/// Raw, unsafe implementation of [`Deserialize`], for use by the macros.
+/// Raw deserialization into outer or flattened elements.
 ///
-/// With `static-xml-derive`, this can be used via `#[static_xml(flatten)]`.
+/// The call site must be `unsafe`, signifying that for soundness
+/// the **caller** must guarantee the following:
 ///
-/// Implementing this type automatically implements `Deserialize`.
-#[doc(hidden)]
-pub trait RawDeserialize<'out>: Sized {
-    type Visitor: RawDeserializeVisitor<'out, Out = Self>;
+/// 1.  Set aside a `MaybeUninit<Self>`.
+/// 2.  Construct a `Self::Buffer` via `Default::default`.
+/// 3.  Visit zero or more times via a `visitor` created with a matching
+///     `out` and `scratch` which have been untouched except via this
+///     method.
+/// 4.  Call `finalize` on the same matching `out` and `scratch` which
+///     have been untouched except by `visitor`.
+///
+/// The trait implementation must be `unsafe`, signifying that for
+/// soundness the **callee** must guarantee that (assuming the caller
+/// follows its contract), `out` is fully initialized when `finalize`
+/// returns `Ok`. The caller may then call `out.assume_init()`.
+pub unsafe trait RawDeserialize: Value {
+    type Scratch: Sized /* TODO? + Default*/;
 }
 
-/*
-/// Raw, unsafe implementation of [`Deserialize`].
-#[doc(hidden)]
-pub unsafe trait RawDeserialize<'out>: Sized {
-    type Visitor: ElementVisitor;
+pub struct RawDeserializeCustomVtable {
+    // scratch layout (size/align)?
 
-    /// Returns a visitor that can be used to populate `this`.
-    fn new(out: &'out mut MaybeUninit<Self>) -> Self::Visitor;
+    pub init_scratch: unsafe fn(scratch: *mut u8),
+    // TODO: drop_scratch_in_place.
 
-    /// Finalizes `out`.
-    ///
-    /// An `Ok` return guarantees `out.assume_init()` is valid.
-    fn finalize(visitor: Self::Visitor, default: Option<fn() -> Self>) -> Result<(), VisitorError>;
+    pub attribute: unsafe fn(
+        out: *mut u8,
+        scratch: *mut u8,
+        name: &ExpandedNameRef<'_>,
+        value: String
+    ) -> Result<Option<String>, VisitorError>,
+
+    pub element: for<'a> unsafe fn(
+        out: *mut u8,
+        scratch: *mut u8,
+        child: ElementReader<'a>,
+    ) -> Result<Option<ElementReader<'a>>, VisitorError>,
+
+    pub characters: unsafe fn(
+        out: *mut u8,
+        scratch: *mut u8,
+        s: String,
+        pos: TextPosition,
+    ) -> Result<Option<String>, crate::BoxedStdError>,
+
+    pub finalize: unsafe fn(
+        out: *mut u8,
+        scratch: *mut u8,
+    ) -> Result<(), VisitorError>,
 }
-*/
+
+impl ValueKind {
+    unsafe fn init_scratch(&self, scratch: *mut u8) {
+        let s = match self {
+            ValueKind::StructVisitor(s) => s,
+            ValueKind::CustomVisitor(c) => return (c.init_scratch)(scratch),
+            ValueKind::Parse(_) => todo!(),
+            ValueKind::CustomDeserialize(_) => unreachable!(),
+        };
+
+        // You'd think there'd be a simple fill on a MaybeUninit slice? But
+        // https://doc.rust-lang.org/reference/types/boolean.html
+        // guarantees false is 0 so let's do this:
+        std::ptr::write_bytes(
+            scratch.add(s.initialized_offset) as *mut bool,
+            0,
+            s.n_fields(),
+        );
+
+        if let Some((text_offset, _)) = s.text {
+            std::ptr::write(scratch.add(text_offset) as *mut String, String::new());
+        }
+
+        /*for f in s.flattened {
+            let f_scratch = scratch.add(f.0);
+            f.1.init_scratch(f_scratch);
+        }*/
+    }
+
+    // TODO: drop_scratch_in_place.
+}
+
+pub struct RawDeserializeVisitor<'a> {
+    out: &'a mut (),
+    scratch: &'a mut (),
+    vtable: ValueKind,
+}
+
+impl<'a> RawDeserializeVisitor<'a> {
+    /// Cheap.
+    #[inline]
+    pub unsafe fn new<T: RawDeserialize>(
+        out: &'a mut MaybeUninit<T>,
+        scratch: &'a mut MaybeUninit<T::Scratch>,
+        vtable: ValueKind,
+    ) -> Self {
+        Self {
+            out: &mut *(out.as_mut_ptr() as *mut ()),
+            scratch: &mut *(scratch.as_mut_ptr() as *mut ()),
+            vtable,
+        }
+    }
+
+    pub fn finalize(mut self) -> Result<(), VisitorError> {
+        unsafe {
+            match self.vtable {
+                ValueKind::StructVisitor(s) => self.struct_visitor(s).finalize(),
+                ValueKind::CustomVisitor(c) => {
+                    return (c.finalize)(
+                        self.out as *mut () as *mut u8,
+                        self.scratch as *mut () as *mut u8,
+                    );
+                },
+                ValueKind::Parse(_) => todo!(),
+                ValueKind::CustomDeserialize(_) => unreachable!(),
+            }
+        }
+    }
+
+    #[inline]
+    fn struct_visitor<'b>(&'b mut self, vtable: &'b StructVtable) -> StructVisitor<'b> {
+        StructVisitor {
+            out: self.out as *mut () as *mut u8,
+            scratch: self.scratch as *mut () as *mut u8,
+            vtable
+        }
+    }
+}
+
+impl<'a> Visitor for RawDeserializeVisitor<'a> {
+    fn attribute(
+        &mut self,
+        name: &ExpandedNameRef<'_>,
+        value: String,
+    ) -> Result<Option<String>, VisitorError> {
+        unsafe {
+            match self.vtable {
+                ValueKind::StructVisitor(s) => {
+                    self.struct_visitor(s).attribute(name, value)
+                },
+                ValueKind::CustomVisitor(c) => {
+                    (c.attribute)(
+                        self.out as *mut () as *mut u8,
+                        self.scratch as *mut () as *mut u8,
+                        name,
+                        value,
+                    )
+                },
+                ValueKind::Parse(_) => todo!(),
+                ValueKind::CustomDeserialize(_) => unreachable!(),
+            }
+        }
+    }
+
+    fn element<'r>(
+        &mut self,
+        child: ElementReader<'r>,
+    ) -> Result<Option<ElementReader<'r>>, VisitorError> {
+        unsafe {
+            match self.vtable {
+                ValueKind::StructVisitor(s) => self.struct_visitor(s).element(child),
+                ValueKind::CustomVisitor(c) => {
+                    return (c.element)(
+                        self.out as *mut () as *mut u8,
+                        self.scratch as *mut () as *mut u8,
+                        child,
+                    );
+                },
+                ValueKind::Parse(_) => todo!(),
+                ValueKind::CustomDeserialize(_) => unreachable!(),
+            }
+        }
+    }
+
+    fn characters(
+        &mut self,
+        text: String,
+        pos: TextPosition,
+    ) -> Result<Option<String>, crate::BoxedStdError> {
+        unsafe {
+            match self.vtable {
+                ValueKind::StructVisitor(s) => self.struct_visitor(s).characters(text, pos),
+                ValueKind::CustomVisitor(c) => {
+                    return (c.characters)(
+                        self.out as *mut () as *mut u8,
+                        self.scratch as *mut () as *mut u8,
+                        text,
+                        pos,
+                    );
+                },
+                ValueKind::Parse(_) => todo!(),
+                ValueKind::CustomDeserialize(_) => unreachable!(),
+            }
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct StructVisitor<'a> {
+    out: *mut u8,
+    scratch: *mut u8,
+    vtable: &'a StructVtable,
+}
+
+impl<'a> StructVisitor<'a> {
+    /// Returns the `initialized` array; caller guarantees `init_scratch` has been called.
+    unsafe fn initialized(self) -> &'a mut [bool] {
+        std::slice::from_raw_parts_mut(
+            self.scratch.add(self.vtable.initialized_offset) as *mut bool,
+            self.vtable.n_fields(),
+        )
+    }
+
+    unsafe fn finalize(self) -> Result<(), VisitorError> {
+        let initialized = self.initialized();
+        let mut i = 0;
+        for nf in self.vtable.elements {
+            let field = ErasedStore::new(
+                nf.field.vtable,
+                &mut *(self.out.add(nf.field.offset as usize) as *mut ()),
+                nf.field.field_kind,
+                &mut initialized[i],
+            );
+            (nf.field.vtable.de.as_ref().unwrap().finalize_field)(
+                field,
+                nf.field.default,
+                &|| VisitorError::missing_element(&nf.name),
+            )?;
+            i += 1;
+        }
+        for nf in self.vtable.attributes {
+            let field = ErasedStore::new(
+                nf.field.vtable,
+                &mut *(self.out.add(nf.field.offset as usize) as *mut ()),
+                nf.field.field_kind,
+                &mut initialized[i],
+            );
+            (nf.field.vtable.de.as_ref().unwrap().finalize_field)(
+                field,
+                nf.field.default,
+                &|| VisitorError::missing_attribute(&nf.name),
+            )?;
+            i += 1;
+        }
+        // TODO: text. need to handle buf. empty == absent or not?
+        /*if let Some((scratch_offset, text)) = &self.vtable.text {
+            let field = ErasedStore {
+                value_type: text.vtable,
+                ptr: self.out.add(text.offset as usize) as *mut (),
+                field_kind: text.field_kind,
+                initialized: &mut initialized[i],
+            };
+            (text.vtable.de.unwrap().finalize_field)(
+                field,
+                text.default,
+                &|| panic!("missing text; does this even make sense?"),
+            )?;
+        }*/
+        // TODO: finalize flatten fields!
+        //assert_eq!(self.vtable.flattened.len(), 0);
+        Ok(())
+    }
+
+    unsafe fn attribute(
+        self,
+        name: &ExpandedNameRef<'_>,
+        value: String,
+    ) -> Result<Option<String>, VisitorError> {
+        let initialized = self.initialized();
+        let field_i = match my_find(name, self.vtable.attributes) {
+            Some(i) => i,
+            None => return Ok(Some(value)), // TODO: handle flattened fields.
+        };
+        let vtable_field = &self.vtable.attributes[field_i].field;
+        let store = ErasedStore::new(
+            vtable_field.vtable,
+            &mut *(self.out.add(vtable_field.offset as usize) as *mut ()),
+            vtable_field.field_kind,
+            &mut initialized[self.vtable.elements.len() + field_i],
+        );
+        vtable_field.vtable.de.as_ref().unwrap().kind.parse(store, name, value)?;
+        Ok(None)
+    }
+
+    unsafe fn element<'r>(
+        self,
+        child: ElementReader<'r>,
+    ) -> Result<Option<ElementReader<'r>>, VisitorError> {
+        let initialized = self.initialized();
+        let field_i = match my_find(&child.expanded_name(), self.vtable.elements) {
+            Some(i) => i,
+            None => return Ok(Some(child)), // TODO: handle flattened fields.
+        };
+        let vtable_field = &self.vtable.elements[field_i].field;
+        let store = ErasedStore::new(
+            vtable_field.vtable,
+            &mut *(self.out.add(vtable_field.offset as usize) as *mut ()),
+            vtable_field.field_kind,
+            &mut initialized[self.vtable.elements.len() + field_i],
+        );
+        vtable_field.vtable.de.as_ref().unwrap().kind.deserialize(store, child)?;
+        Ok(None)
+    }
+
+    unsafe fn characters(
+        self,
+        text: String,
+        _pos: TextPosition,
+    ) -> Result<Option<String>, crate::BoxedStdError> {
+        if let Some((scratch_offset, _)) = self.vtable.text {
+            let buf = &mut *(self.scratch.add(scratch_offset) as *mut String);
+            if buf.is_empty() { // optimization: avoid allocating/copying/deallocating
+                *buf = text;
+            } else {
+                buf.push_str(&text);
+            }
+            return Ok(None)
+        }
+        // TODO: handle flattened fields.
+        Ok(Some(text))
+    }
+}
 
 /*
 impl<'a, T: RawDeserialize<'a>> Deserialize for T {
@@ -1191,11 +1230,12 @@ impl<'a, T: RawDeserialize<'a>> Deserialize for T {
 #[macro_export]
 macro_rules! impl_deserialize_via_raw {
     ( $t:ident, $visitor:ident ) => {
-        impl ::static_xml::de::Deserialize for $t {
+        /*impl ::static_xml::de::Deserialize for $t {
             fn deserialize(
                 element: ::static_xml::de::ElementReader<'_>,
             ) -> Result<Self, ::static_xml::de::VisitorError> {
                 let mut out = ::std::mem::MaybeUninit::uninit();
+                // TODO: umm, shouldn't this initialize scratch?
                 let mut visitor =
                     <$visitor as ::static_xml::de::RawDeserializeVisitor>::new(&mut out);
                 element.read_to(&mut visitor)?;
@@ -1203,7 +1243,7 @@ macro_rules! impl_deserialize_via_raw {
                 // SAFETY: finalize's contract guarantees assume_init is safe.
                 Ok(unsafe { out.assume_init() })
             }
-        }
+        }*/
     };
 }
 
@@ -1246,7 +1286,7 @@ pub trait ParseText: Sized {
 }
 
 /// Visitor used within [`Deserialize`].
-pub trait ElementVisitor {
+pub trait Visitor {
     /// Processes a given attribute of this element's start tag.
     ///
     /// Implementations which can be used as flattened fields may consume
@@ -1362,61 +1402,6 @@ pub fn normalize(s: String, whitespace: WhiteSpace) -> String {
     unsafe { String::from_utf8_unchecked(v) }
 }
 
-/// Delegates a child element to a list of flattened fields.
-///
-/// This is `#[doc(hidden)]` because it's a helper for the macros only.
-#[doc(hidden)]
-pub fn delegate_element<'a>(
-    flatten_fields: &mut [&mut dyn ElementVisitor],
-    mut child: ElementReader<'a>,
-) -> Result<Option<ElementReader<'a>>, VisitorError> {
-    for f in flatten_fields {
-        match f.element(child) {
-            Ok(Some(c)) => child = c,
-            r => {
-                return r;
-            }
-        }
-    }
-    Ok(Some(child))
-}
-
-/// Delegates an attribute to a list of flattened fields.
-///
-/// This is `#[doc(hidden)]` because it's a helper for the macros only.
-#[doc(hidden)]
-pub fn delegate_attribute(
-    flatten_fields: &mut [&mut dyn ElementVisitor],
-    name: &ExpandedNameRef,
-    mut value: String,
-) -> Result<Option<String>, VisitorError> {
-    for f in flatten_fields {
-        match f.attribute(name, value) {
-            Ok(Some(v)) => value = v,
-            r => return r,
-        }
-    }
-    Ok(Some(value))
-}
-
-/// Delegates characters to a list of flattened fields.
-///
-/// This is `#[doc(hidden)]` because it's a helper for the macros only.
-#[doc(hidden)]
-pub fn delegate_characters(
-    flatten_fields: &mut [&mut dyn ElementVisitor],
-    mut s: String,
-    pos: TextPosition,
-) -> Result<Option<String>, crate::BoxedStdError> {
-    for f in flatten_fields {
-        match f.characters(s, pos) {
-            Ok(Some(ss)) => s = ss,
-            r => return r,
-        }
-    }
-    Ok(Some(s))
-}
-
 /// Helper for [`Deserialize`] impls: finds `name` in `sorted_slice`, returning its index or `None`.
 ///
 /// This is simply `sorted_slice.binary_search(name).ok()`, but using this
@@ -1430,49 +1415,6 @@ pub fn find(name: &ExpandedNameRef<'_>, sorted_slice: &[ExpandedNameRef<'_>]) ->
 fn my_find(name: &ExpandedNameRef<'_>, sorted_slice: &[NamedField]) -> Option<usize> {
     sorted_slice.binary_search_by_key(name, |nf| nf.name).ok()
 }
-
-macro_rules! element_field {
-    ( $out_type:ty, $field_type:ident ) => {
-        impl<T: HasFieldVtable + Deserialize> ElementField for $out_type {
-            const TYPE: FieldType = FieldType::$field_type;
-            const VTABLE: &'static FieldVtable = T::VTABLE;
-
-            #[inline]
-            unsafe fn element(
-                field: &mut MaybeUninit<Self>,
-                initialized: &mut bool,
-                child: ElementReader<'_>,
-            ) -> Result<(), VisitorError> {
-                let field = Field {
-                    ptr: field.as_mut_ptr() as *mut (),
-                    field_type: FieldType::$field_type,
-                    initialized,
-                };
-                T::VTABLE.deserialize(field, child)
-            }
-
-            #[inline]
-            unsafe fn finalize(
-                field: &mut MaybeUninit<Self>,
-                initialized: &mut bool,
-                expected: &ExpandedNameRef<'_>,
-                default: *const (), //Option<fn() -> Self>,
-            ) -> Result<(), VisitorError> {
-                let field = Field {
-                    ptr: field.as_mut_ptr() as *mut (),
-                    field_type: FieldType::$field_type,
-                    initialized,
-                };
-                (T::VTABLE.finalize)(field, std::mem::transmute::<_, _>(default), &|| {
-                    VisitorError::missing_element(expected)
-                })
-            }
-        }
-    };
-}
-element_field!(T, Direct);
-element_field!(Option<T>, Option);
-element_field!(Vec<T>, Vec);
 
 /*
 #[doc(hidden)]
@@ -1525,7 +1467,7 @@ unsafe impl<'out, T: SingleElementContainer> RawDeserializeVisitor<'out> for Req
     }
 }
 
-impl<'out, T: SingleElementContainer> ElementVisitor for RequiredVisitor<'out, T> {
+impl<'out, T: SingleElementContainer> Visitor for RequiredVisitor<'out, T> {
     fn element<'a>(
         &mut self,
         child: ElementReader<'a>,
@@ -1568,7 +1510,7 @@ unsafe impl<'out, T: SingleElementContainer> RawDeserializeVisitor<'out> for Opt
     }
 }
 
-impl<'out, T: SingleElementContainer> ElementVisitor for OptionalVisitor<'out, T> {
+impl<'out, T: SingleElementContainer> Visitor for OptionalVisitor<'out, T> {
     fn element<'a>(
         &mut self,
         child: ElementReader<'a>,
@@ -1668,7 +1610,7 @@ mod tests {
     #[derive(Debug, Default, Eq, PartialEq)]
     struct Dummy;
 
-    impl ElementVisitor for Dummy {}
+    impl Visitor for Dummy {}
     impl Deserialize for Dummy {
         fn deserialize(element: ElementReader<'_>) -> Result<Self, VisitorError> {
             let mut dummy = Dummy::default();
@@ -1682,7 +1624,7 @@ mod tests {
 
     struct AttrWrapperVisitor<T: DeserializeAttr>(T, bool);
 
-    impl<T: DeserializeAttr> ElementVisitor for AttrWrapperVisitor<T> {
+    impl<T: DeserializeAttr> Visitor for AttrWrapperVisitor<T> {
         fn attribute(
             &mut self,
             name: &ExpandedNameRef<'_>,

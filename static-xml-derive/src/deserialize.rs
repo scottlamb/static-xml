@@ -33,61 +33,16 @@ fn flattened_field_definitions(struct_: &ElementStruct) -> Vec<TokenStream> {
                 return None;
             }
             let span = field.inner.span();
-            let field_visitor = format_ident!("{}_visitor", field.ident);
+            let field_scratch = format_ident!("{}_scratch", field.ident);
             let ty = &field.inner.ty;
             Some(quote_spanned! {span=>
-                #field_visitor: <#ty as ::static_xml::de::RawDeserialize<'out>>::Visitor
+                #field_scratch: <#ty as ::static_xml::de::RawDeserialize>::Scratch
             })
         })
         .collect()
 }
 
-fn flattened_field_initializers(struct_: &ElementStruct) -> Vec<TokenStream> {
-    struct_
-        .fields
-        .iter()
-        .filter_map(|field| {
-            if !matches!(field.mode, ElementFieldMode::Flatten) {
-                return None;
-            }
-            let span = field.inner.span();
-            let field_visitor = format_ident!("{}_visitor", field.ident);
-            let fident = field.ident;
-            let ty = &field.inner.ty;
-            Some(quote_spanned! {span=>
-                #field_visitor: <#ty as ::static_xml::de::RawDeserialize>::Visitor::new(
-                    // SAFETY: out points to valid, uninitialized memory.
-                    unsafe {
-                        &mut *(
-                            ::std::ptr::addr_of_mut!((*out.as_mut_ptr()).#fident)
-                            as *mut ::std::mem::MaybeUninit<#ty>
-                        )
-                    }
-                )
-            })
-        })
-        .collect()
-}
-
-fn finalize_flattened_fields(struct_: &ElementStruct) -> Vec<TokenStream> {
-    struct_.fields.iter().filter_map(|field| {
-        if !matches!(field.mode, ElementFieldMode::Flatten) {
-            return None;
-        }
-        let span = field.inner.span();
-        let ty = &field.inner.ty;
-        let default = match field.default {
-            true => quote_spanned! {span=> Some(<#ty as ::std::default::Default>::default) },
-            false => quote! { None }
-        };
-        let field_visitor = format_ident!("{}_visitor", field.ident);
-        Some(quote_spanned! {span=>
-            <#ty as ::static_xml::de::RawDeserialize>::Visitor::finalize(self.#field_visitor, #default)?;
-        })
-    }).collect()
-}
-
-fn vtable_field(struct_: &ElementStruct, field: &ElementField, trait_: TokenStream) -> TokenStream {
+fn vtable_field(struct_: &ElementStruct, field: &ElementField) -> TokenStream {
     let ident = &struct_.input.ident;
     let span = field.inner.span();
     let ty = &field.inner.ty;
@@ -103,37 +58,23 @@ fn vtable_field(struct_: &ElementStruct, field: &ElementField, trait_: TokenStre
         false => quote! { std::ptr::null() }
     };
     quote_spanned! {span=>
-        ::static_xml::de::ElementVtableField {
+        ::static_xml::value::StructVtableField {
             // SAFETY: an assertion checks the struct's size doesn't exceed u32::MAX.
             offset: unsafe { ::static_xml::offset_of!(#ident, #fident) } as u32,
-            field_type: <#ty as ::static_xml::de::#trait_>::TYPE,
-            vtable: <#ty as ::static_xml::de::#trait_>::VTABLE,
+            field_kind: <#ty as ::static_xml::value::Field>::KIND,
+            vtable: <<#ty as ::static_xml::value::Field>::Value as ::static_xml::value::Value>::VTABLE,
             default: #default,
         }
     }
 }
 
-fn attributes(struct_: &ElementStruct) -> Vec<TokenStream> {
-    struct_.sorted_attributes.iter().map(|&p| {
+fn named_fields(struct_: &ElementStruct, sorted: &[usize]) -> Vec<TokenStream> {
+    sorted.iter().map(|&p| {
         let field = &struct_.fields[p];
         let name = field.name.quote_expanded();
-        let vtable_field = vtable_field(struct_, field, quote! { AttrField });
+        let vtable_field = vtable_field(struct_, field);
         quote! {
-            ::static_xml::de::NamedField {
-                name: #name,
-                field: #vtable_field,
-            }
-        }
-    }).collect()
-}
-
-fn elements(struct_: &ElementStruct) -> Vec<TokenStream> {
-    struct_.sorted_elements.iter().map(|&p| {
-        let field = &struct_.fields[p];
-        let name = field.name.quote_expanded();
-        let vtable_field = vtable_field(struct_, field, quote! { ElementField });
-        quote! {
-            ::static_xml::de::NamedField {
+            ::static_xml::value::NamedField {
                 name: #name,
                 field: #vtable_field,
             }
@@ -142,100 +83,56 @@ fn elements(struct_: &ElementStruct) -> Vec<TokenStream> {
 }
 
 fn do_struct(struct_: &ElementStruct) -> TokenStream {
-    let attributes = attributes(&struct_);
-    let elements = elements(&struct_);
+    let attributes = named_fields(&struct_, &struct_.sorted_attributes[..]);
+    let elements = named_fields(&struct_, &struct_.sorted_elements[..]);
 
     let ident = &struct_.input.ident;
-    let visitor_type = format_ident!("{}Visitor", &struct_.input.ident);
-    let flattened_field_definitions = flattened_field_definitions(&struct_);
-    let flattened_field_initializers = flattened_field_initializers(&struct_);
-    let finalize_flattened_fields = finalize_flattened_fields(&struct_);
-    let flatten_visitors = quote_flatten_visitors(&struct_);
+    let _flattened_field_definitions = flattened_field_definitions(&struct_);
+    let _flatten_visitors = quote_flatten_visitors(&struct_);
     let n_fields = elements.len() + attributes.len();  // TODO: text.
     quote! {
-        const _: () = assert!(std::mem::size_of::<#visitor_type>() < u32::MAX as usize);
-        const VTABLE: ::static_xml::de::ElementVtable = ::static_xml::de::ElementVtable {
+        const _: () = assert!(std::mem::size_of::<#ident>() < u32::MAX as usize);
+
+        const STRUCT_VTABLE: &'static ::static_xml::value::StructVtable = &::static_xml::value::StructVtable {
+            deserialize: None, // TODO
             elements: &[#(#elements,)*],
             attributes: &[#(#attributes,)*],
             text: None, // TODO
+            // TODO: flattened.
+            initialized_offset: unsafe { ::static_xml::offset_of!(Scratch, initialized) },
         };
 
         // If there's an underlying field named e.g. `foo_`, then there will be
         // a generated field name e.g. `foo__required` or `foo__visitor`. Don't
         // complain about this.
         #[allow(non_snake_case)]
-        struct #visitor_type<'out> {
-            // This can't be &mut MaybeUninit<#type> because flattened fields
-            // (if any) get a &mut MaybeUninit<#type> that aliases it. So
-            // use a raw pointer. u8 is best for ptr::add(offset_of!(...)).
-            out: *mut u8,
-            _phantom: ::std::marker::PhantomData<&'out mut #ident>,
-            text_buf: String, // TODO: can omit if there's no text field.
+        struct Scratch {
+            // text_buf: String, // TODO: can omit if there's no text field.
             initialized: [bool; #n_fields],
-            #(#flattened_field_definitions, )*
+            // #(#flattened_field_definitions, )*
         }
 
-        impl<'out> #visitor_type<'out> {
-            fn vtable_visitor<'a>(&'a mut self) -> ::static_xml::de::VtableVisitor<'a> {
-                unsafe {
-                    ::static_xml::de::VtableVisitor::new(
-                        self.out,
-                        &VTABLE,
-                        &mut self.initialized[..],
-                        &mut self.text_buf,
-                        //&mut [#(#flatten_visitors, )*],
-                    )
-                }
-            }
+        unsafe impl ::static_xml::de::RawDeserialize for #ident {
+            type Scratch = Scratch;
         }
 
-        impl<'out> ::static_xml::de::ElementVisitor for #visitor_type<'out> {
-            fn element<'a>(
-                &mut self,
-                child: ::static_xml::de::ElementReader<'a>,
-            ) -> Result<Option<::static_xml::de::ElementReader<'a>>, ::static_xml::de::VisitorError> {
-                ::static_xml::de::ElementVisitor::element(&mut self.vtable_visitor(), child)
-            }
-
-            fn attribute<'a>(
-                &mut self,
-                name: &::static_xml::ExpandedNameRef,
-                value: String,
-            ) -> Result<Option<String>, ::static_xml::de::VisitorError> {
-                ::static_xml::de::ElementVisitor::attribute(&mut self.vtable_visitor(), name, value)
-            }
-
-            // TODO: characters.
+        unsafe fn finalize_field(
+            field: ::static_xml::de::ErasedStore<'_>,
+            default_fn: *const (),
+            err_fn: &dyn Fn() -> ::static_xml::de::VisitorError,
+        ) -> Result<(), ::static_xml::de::VisitorError> {
+            field.into_store::<#ident>().finalize(default_fn, err_fn)
         }
 
-        unsafe impl<'out> ::static_xml::de::RawDeserializeVisitor<'out> for #visitor_type<'out> {
-            type Out = #ident;
-
-            fn new(out: &'out mut ::std::mem::MaybeUninit<Self::Out>) -> Self {
-                Self {
-                    out: out.as_mut_ptr() as *mut u8,
-                    initialized: [false; #n_fields],
-                    text_buf: String::new(),
-                    _phantom: ::std::marker::PhantomData,
-                    #(#flattened_field_initializers, )*
-                }
-            }
-
-            #[warn(unused_mut)] // mut is needed iff there are flattened fields.
-            fn finalize(mut self, _default: Option<fn() -> Self::Out>) -> Result<(), ::static_xml::de::VisitorError> {
-                // Note _default is currently unsupported for structs.
-
-                #(#finalize_flattened_fields)*
-                // SAFETY: returning `Ok` guarantees `self.out` is fully initialized.
-                // finalize_visitor_fields has guaranteed that each field is fully initialized.
-                // The padding doesn't matter. This is similar to this example
-                // https://doc.rust-lang.org/stable/std/mem/union.MaybeUninit.html#initializing-a-struct-field-by-field
-                Ok(())
-            }
+        unsafe impl ::static_xml::value::Value for #ident {
+            const VTABLE: &'static ::static_xml::value::ValueVtable = &::static_xml::value::ValueVtable {
+                type_name: concat!(module_path!(), "::", stringify!(#ident)),
+                de: Some(::static_xml::de::Vtable {
+                    kind: ::static_xml::de::ValueKind::StructVisitor(STRUCT_VTABLE),
+                    finalize_field,
+                }),
+            };
         }
-
-        ::static_xml::impl_deserialize_via_raw!(#ident, #visitor_type);
-        ::static_xml::deserialize_vtable!(#ident);
     }
 }
 
@@ -329,7 +226,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
             initialized: bool,
         }
 
-        impl<'out> ::static_xml::de::ElementVisitor for #visitor_type<'out> {
+        impl<'out> ::static_xml::de::Visitor for #visitor_type<'out> {
             fn element<'a>(
                 &mut self,
                 mut child: ::static_xml::de::ElementReader<'a>,
@@ -383,7 +280,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                 Ok(())
             }
         }
-        ::static_xml::deserialize_vtable!(#ident);
+        ::static_xml::custom_deserialize_vtable!(#ident);
 
         impl<'out> ::static_xml::de::RawDeserialize<'out> for #ident {
             type Visitor = #visitor_type<'out>;
@@ -395,7 +292,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
 
 pub(crate) fn derive(errors: &Errors, input: syn::DeriveInput) -> Result<TokenStream, ()> {
     match input.data {
-        Data::Enum(ref data) => Ok(do_enum(&ElementEnum::new(&errors, &input, data))),
+        Data::Enum(ref data) => Ok(TokenStream::new()),//do_enum(&ElementEnum::new(&errors, &input, data))),
         Data::Struct(ref data) => ElementStruct::new(&errors, &input, data).map(|s| do_struct(&s)),
         _ => {
             errors.push(syn::Error::new_spanned(

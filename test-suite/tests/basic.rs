@@ -5,7 +5,7 @@
 
 use static_xml_derive::{Deserialize, ParseText, Serialize, ToText};
 
-#[derive(Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Default, /*Deserialize,*/ Eq, PartialEq, Serialize)]
 #[static_xml(
     namespace = "foo: http://example.com/foo",
     namespace = "bar: http://example.com/bar",
@@ -26,6 +26,103 @@ struct Foo {
 
     choice: MyChoice,
 }
+const _: () = {
+    const STRUCT_VTABLE: &'static ::static_xml::value::StructVtable =
+        &::static_xml::value::StructVtable {
+            deserialize: None,
+            elements: &[
+                ::static_xml::value::NamedField {
+                    name: ::static_xml::ExpandedNameRef {
+                        local_name: "choice",
+                        namespace: "",
+                    },
+                    field: ::static_xml::value::StructVtableField {
+                        offset: ::static_xml::offset_of!(Foo, choice) as u32,
+                        field_kind: <MyChoice as ::static_xml::value::Field>::KIND,
+                        vtable: <<MyChoice as ::static_xml::value::Field>::Value as ::static_xml::value::Value>::VTABLE,
+                        default: std::ptr::null(),
+                    },
+                },
+                ::static_xml::value::NamedField {
+                    name: ::static_xml::ExpandedNameRef {
+                        local_name: "constrained",
+                        namespace: "",
+                    },
+                    field: ::static_xml::value::StructVtableField {
+                        offset: ::static_xml::offset_of!(Foo, constrained) as u32,
+                        field_kind: <ConstrainedString as ::static_xml::value::Field>::KIND,
+                        vtable: <ConstrainedString as ::static_xml::value::Value>::VTABLE,
+                        default: std::ptr::null(),
+                    },
+                },
+                ::static_xml::value::NamedField {
+                    name: ::static_xml::ExpandedNameRef {
+                        local_name: "text",
+                        namespace: "",
+                    },
+                    field: ::static_xml::value::StructVtableField {
+                        offset: ::static_xml::offset_of!(Foo, text) as u32,
+                        field_kind: <String as ::static_xml::value::Field>::KIND,
+                        vtable: <String as ::static_xml::value::Value>::VTABLE,
+                        default: std::ptr::null(),
+                    },
+                },
+                ::static_xml::value::NamedField {
+                    name: ::static_xml::ExpandedNameRef {
+                        local_name: "blah",
+                        namespace: "http://example.com/bar",
+                    },
+                    field: ::static_xml::value::StructVtableField {
+                        offset: ::static_xml::offset_of!(Foo, string) as u32,
+                        field_kind: <Vec<String> as ::static_xml::value::Field>::KIND,
+                        vtable: <<Vec<String> as ::static_xml::value::Field>::Value as ::static_xml::value::Value>::VTABLE,
+                        default: std::ptr::null(),
+                    },
+                },
+            ],
+            attributes: &[::static_xml::value::NamedField {
+                name: ::static_xml::ExpandedNameRef {
+                    local_name: "mybool",
+                    namespace: "",
+                },
+                field: ::static_xml::value::StructVtableField {
+                    offset: ::static_xml::offset_of!(Foo, mybool) as u32,
+                    field_kind: <bool as ::static_xml::value::Field>::KIND,
+                    vtable: <bool as ::static_xml::value::Value>::VTABLE,
+                    default: unsafe {
+                        ::std::mem::transmute::<_, *const ()>(
+                            <bool as ::std::default::Default>::default as fn() -> bool,
+                        )
+                    },
+                },
+            }],
+            text: None,
+            initialized_offset: ::static_xml::offset_of!(Scratch, initialized),
+        };
+    #[allow(non_snake_case)]
+    struct Scratch {
+        initialized: [bool; 5usize],
+    }
+    unsafe impl ::static_xml::de::RawDeserialize for Foo {
+        type Scratch = Scratch;
+    }
+    unsafe fn finalize_field(
+        field: ::static_xml::de::ErasedStore<'_>,
+        default_fn: *const (),
+        err_fn: &dyn Fn() -> ::static_xml::de::VisitorError,
+    ) -> Result<(), ::static_xml::de::VisitorError> {
+        field.into_store::<Foo>().finalize(default_fn, err_fn)
+    }
+    unsafe impl ::static_xml::value::Value for Foo {
+        const VTABLE: &'static ::static_xml::value::ValueVtable = &::static_xml::value::ValueVtable {
+            type_name: "basic::Foo",
+            de: Some(::static_xml::de::Vtable {
+                kind: ::static_xml::de::ValueKind::StructVisitor(STRUCT_VTABLE),
+                finalize_field,
+            }),
+        };
+    }
+};
 
 #[derive(Debug, Eq, PartialEq, ParseText, ToText)]
 #[static_xml(whitespace = "collapse")]
