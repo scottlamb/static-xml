@@ -1,6 +1,8 @@
 // Copyright (C) 2021 Scott Lamb <slamb@slamb.org>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+#![feature(const_ptr_offset_from, const_type_name)]
+
 use static_xml_derive::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

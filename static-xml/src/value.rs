@@ -3,7 +3,7 @@ use crate::{de, ExpandedNameRef};
 /// Type-erased handling of serializable/deserializable values.
 
 /// A value type with a registered vtable.
-/// 
+///
 /// The vtable allows type-erased handling of these values, including
 /// serialization and/or deserialization.
 pub unsafe trait Value: 'static {
@@ -12,7 +12,7 @@ pub unsafe trait Value: 'static {
 
 pub struct ValueVtable {
     /// A name for this type, which is not guaranteed to be unique.
-    /// 
+    ///
     /// See [`std::any::type_name`].
     pub type_name: &'static str,
 
@@ -50,7 +50,6 @@ pub enum FieldKind {
     Vec,
 }
 
-
 #[doc(hidden)]
 pub struct NamedField {
     pub name: ExpandedNameRef<'static>,
@@ -58,10 +57,10 @@ pub struct NamedField {
 }
 
 /// Describes field metadata needed for (de)serialization of a `struct`.
-/// 
+///
 /// This includes the offsets within the `struct` of the field, its type,
 /// attribute/element names, etc.
-/// 
+///
 /// It also includes the layout of the "scratch" space used during
 /// deserialization. (Booleans describing which fields have been initialized,
 /// a `String` buffer for accumulating text nodes, and any scratch space used
@@ -73,14 +72,14 @@ pub struct NamedField {
 //   deserializing several enum variants into a single field. See
 //   [#4](https://github.com/scottlamb/static-xml/issues/4).
 // * avoid repeating the two-word namespace &str on each element/attribute.
-// * 
+// *
 #[doc(hidden)]
 pub struct StructVtable {
     // TODO: rather than exposed fields, add unsafe constructor.
     pub deserialize: Option<&'static de::DeserializeFn>,
     // TODO: finalize.
-    pub elements: &'static [NamedField],
-    pub attributes: &'static [NamedField],
+    pub elements: Vec<NamedField>,
+    pub attributes: Vec<NamedField>,
 
     /// Offset within scratch and field for text, if any.
     pub text: Option<(usize, StructVtableField)>,
@@ -106,3 +105,5 @@ pub struct StructVtableField {
     pub vtable: &'static ValueVtable,
     pub default: *const (),
 }
+unsafe impl Send for StructVtableField {}
+unsafe impl Sync for StructVtableField {}

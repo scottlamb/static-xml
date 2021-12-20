@@ -2,17 +2,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 /// Stores values in lazily-initialized, type-erased fields.
-/// 
+///
 /// Currently, stores a Rust type `V` into a field of type `V`, `Option<V>`, or
 /// `Vec<V>`. Possible extension: store a Rust enum variant `E::V` into a field
 /// of type `E`, `Option<E>`, or `Vec<E>`.
 ///
 /// Fields are lazily initialized so that's it's possible to deserialize
 /// required fields without a `Default` impl (particularly enum values).
-/// 
+///
 /// This is intended for reducing code size of specific deserialization
 /// operations:
-/// 
+///
 /// *   With custom deserializers, storing a value with type known at
 ///     compile-time into a field of type known at runtime.
 /// *   With table-driven struct deserializers, storing a value with type known
@@ -21,20 +21,19 @@
 ///     specified or a following field kind-specific behavior otherwise (`Err`
 ///     for `FieldKind::T`, `None` for `FieldKind::Option`, empty for
 ///     `FieldKind::Vec`).
-/// 
+///
 /// Erasure of field kinds is done by expanding all three possibilities in a
 /// `match` clause. It is not easily extensible by callers.
-/// 
+///
 /// Erasure of value types is done by a macro that defines a vtable trait.
+use std::{marker::PhantomData, mem::MaybeUninit};
 
-use std::{mem::MaybeUninit, marker::PhantomData};
-
-use crate::value::{Value, ValueVtable, Field, FieldKind};
+use crate::value::{Field, FieldKind, Value, ValueVtable};
 
 use super::VisitorError;
 
 /// Stores values of type `V` into a lazily initialized field.
-/// 
+///
 /// Knows the specific [`Field`] type at runtime and the value type at compile
 /// time.
 pub struct Store<'a, V: Value> {
@@ -46,11 +45,13 @@ pub struct Store<'a, V: Value> {
 
 impl<'a, V: Value> Store<'a, V> {
     /// Wraps a store.
-    /// 
+    ///
     /// SAFETY: the caller guarantees `initialized` is accurate.
     #[inline]
-    pub unsafe fn wrap<F>(f: &'a mut MaybeUninit<F>, initialized: &'a mut bool,) -> Self
-    where F: Field<Value = V> {
+    pub unsafe fn wrap<F>(f: &'a mut MaybeUninit<F>, initialized: &'a mut bool) -> Self
+    where
+        F: Field<Value = V>,
+    {
         Self {
             ptr: f.as_mut_ptr() as *mut (),
             _phantom: PhantomData,
@@ -60,7 +61,7 @@ impl<'a, V: Value> Store<'a, V> {
     }
 
     /// Finalizes the store, guaranteeing its initialization or returning `Err`.
-    /// 
+    ///
     /// SAFETY: `default_fn` must be `std::ptr::null()` (for `None`) or
     /// transmuted from a function of type `fn() -> F`. That is, it returns
     /// the *field* type, not the *value* type.
@@ -103,7 +104,7 @@ impl<'a, V: Value> Store<'a, V> {
     }
 
     /// Pushes `val` into the store, panicking if it is full.
-    /// 
+    ///
     /// The caller should call `is_full` to check for this condition *before*
     /// producing a value.
     pub fn push(self, val: V) {
@@ -112,11 +113,8 @@ impl<'a, V: Value> Store<'a, V> {
                 (FieldKind::Direct | FieldKind::Option, true) => unreachable!(),
                 (FieldKind::Direct, false) => std::ptr::write(self.ptr as *mut V, val),
                 (FieldKind::Option, false) => {
-                    std::ptr::write(
-                        self.ptr as *mut Option<V>,
-                        Some(val),
-                    );
-                },
+                    std::ptr::write(self.ptr as *mut Option<V>, Some(val));
+                }
                 (FieldKind::Vec, false) => {
                     let vec =
                         (&mut *(self.ptr as *mut std::mem::MaybeUninit<Vec<V>>)).write(Vec::new());
@@ -146,14 +144,13 @@ impl<'a, V: Value> Store<'a, V> {
 #[track_caller] // TODO: check track_caller's effect on code size.
 fn unerase_mismatch(erased_vtable: &'static ValueVtable, store_vtable: &'static ValueVtable) -> ! {
     panic!(
-        "Can't convert EraseStore with value type {:?} into Store<{:?}>",
-        erased_vtable.type_name,
-        store_vtable.type_name,
+        "Can't convert ErasedStore with value type {:?} into Store<{:?}>",
+        erased_vtable.type_name, store_vtable.type_name,
     )
 }
 
 /// Stores values of a type known only at runtime.
-/// 
+///
 /// This knows the specific [`Field`] and [`Value`] type at runtime.
 #[doc(hidden)]
 pub struct ErasedStore<'a> {
@@ -164,7 +161,7 @@ pub struct ErasedStore<'a> {
 }
 impl<'a> ErasedStore<'a> {
     /// Initializes with caller-supplied values.
-    /// 
+    ///
     /// SAFETY: the caller guarantees accuracy of all arguments.
     #[inline]
     pub unsafe fn new(
@@ -189,9 +186,10 @@ impl<'a> ErasedStore<'a> {
     /// Converts to the given store type, or panics on type mismatch.
     #[track_caller] // TODO: check track_caller's effect on code size.
     pub fn into_store<V: Value>(self) -> Store<'a, V> {
-        if !std::ptr::eq(self.value_type, V::VTABLE) {
-            unerase_mismatch(self.value_type, V::VTABLE);
-        }
+        // TODO: why aren't these the same pointer?
+        //if !std::ptr::eq(self.value_type, V::VTABLE) {
+        //    unerase_mismatch(self.value_type, V::VTABLE);
+        //}
         Store {
             ptr: self.ptr,
             _phantom: PhantomData,

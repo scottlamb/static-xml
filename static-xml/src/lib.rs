@@ -20,7 +20,7 @@ pub use xml::common::TextPosition;
 pub use memoffset::offset_of;
 
 #[doc(hidden)]
-pub use lazycell::AtomicLazyCell;
+pub use once_cell::sync::OnceCell;
 
 /// A reference to an "expanded name": namespace and local name.
 ///
