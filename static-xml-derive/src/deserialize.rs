@@ -98,16 +98,16 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
     quote! {
         const _: () = assert!(std::mem::size_of::<#ident>() < u32::MAX as usize);
 
+        static VTABLE: &'static ::static_xml::value::StructVtable = &::static_xml::value::StructVtable {
+            deserialize: None, // TODO
+            elements: &[#(#elements,)*],
+            attributes: &[#(#attributes,)*],
+            text: None, // TODO
+            // TODO: flattened.
+            initialized_offset: unsafe { ::static_xml::offset_of!(Scratch, initialized) },
+        };
         fn #struct_vtable() -> &'static ::static_xml::value::StructVtable {
-            static CELL: ::static_xml::OnceCell<::static_xml::value::StructVtable> = ::static_xml::OnceCell::new();
-            CELL.get_or_init(|| ::static_xml::value::StructVtable {
-                deserialize: None, // TODO
-                elements: vec![#(#elements,)*],
-                attributes: vec![#(#attributes,)*],
-                text: None, // TODO
-                // TODO: flattened.
-                initialized_offset: unsafe { ::static_xml::offset_of!(Scratch, initialized) },
-            })
+            VTABLE
         }
 
         // If there's an underlying field named e.g. `foo_`, then there will be

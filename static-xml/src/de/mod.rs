@@ -1162,7 +1162,7 @@ impl<'a> StructVisitor<'a> {
     unsafe fn finalize(self) -> Result<(), VisitorError> {
         let initialized = self.initialized();
         let mut i = 0;
-        for nf in &self.vtable.elements {
+        for nf in self.vtable.elements {
             let field = ErasedStore::new(
                 nf.field.vtable,
                 &mut *(self.out.add(nf.field.offset as usize) as *mut ()),
@@ -1176,7 +1176,7 @@ impl<'a> StructVisitor<'a> {
             )?;
             i += 1;
         }
-        for nf in &self.vtable.attributes {
+        for nf in self.vtable.attributes {
             let field = ErasedStore::new(
                 nf.field.vtable,
                 &mut *(self.out.add(nf.field.offset as usize) as *mut ()),

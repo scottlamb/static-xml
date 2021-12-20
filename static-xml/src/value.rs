@@ -78,8 +78,8 @@ pub struct StructVtable {
     // TODO: rather than exposed fields, add unsafe constructor.
     pub deserialize: Option<&'static de::DeserializeFn>,
     // TODO: finalize.
-    pub elements: Vec<NamedField>,
-    pub attributes: Vec<NamedField>,
+    pub elements: &'static [NamedField],
+    pub attributes: &'static [NamedField],
 
     /// Offset within scratch and field for text, if any.
     pub text: Option<(usize, StructVtableField)>,
