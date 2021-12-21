@@ -90,7 +90,6 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
     let elements = named_fields(&struct_, &struct_.sorted_elements[..]);
 
     let ident = &struct_.input.ident;
-    let struct_vtable = format_ident!("STRUCT_VTABLE_FOR_{}", ident);
 
     let _flattened_field_definitions = flattened_field_definitions(&struct_);
     let _flatten_visitors = quote_flatten_visitors(&struct_);
@@ -99,20 +98,19 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
         const _: () = assert!(std::mem::size_of::<#ident>() < u32::MAX as usize);
 
         static VTABLE: &'static ::static_xml::value::StructVtable = &::static_xml::value::StructVtable {
-            deserialize: None, // TODO
             elements: &[#(#elements,)*],
             attributes: &[#(#attributes,)*],
             text: None, // TODO
             // TODO: flattened.
             initialized_offset: unsafe { ::static_xml::offset_of!(Scratch, initialized) },
         };
-        fn #struct_vtable() -> &'static ::static_xml::value::StructVtable {
+        fn struct_vtable() -> &'static ::static_xml::value::StructVtable {
             VTABLE
         }
 
-        // If there's an underlying field named e.g. `foo_`, then there will be
-        // a generated field name e.g. `foo__required` or `foo__visitor`. Don't
-        // complain about this.
+        // If there's an underlying flattened field named e.g. `foo_`, then
+        // there will be a generated field name e.g. `foo__visitor`.
+        // Don't complain about this.
         #[allow(non_snake_case)]
         pub struct Scratch {
             // text_buf: String, // TODO: can omit if there's no text field.
@@ -137,7 +135,8 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
             const VTABLE: &'static ::static_xml::value::ValueVtable = &::static_xml::value::ValueVtable {
                 type_name: concat!(module_path!(), "::", stringify!(#ident)),
                 de: Some(::static_xml::de::Vtable {
-                    kind: ::static_xml::de::ValueKind::StructVisitor(#struct_vtable as fn() -> &'static ::static_xml::value::StructVtable),
+                    deserialize_into: ::static_xml::de::deserialize_into_via_raw::<#ident>,
+                    kind: ::static_xml::de::ValueKind::StructVisitor(struct_vtable),
                     finalize_field,
                 }),
             };

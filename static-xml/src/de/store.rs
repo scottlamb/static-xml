@@ -100,6 +100,7 @@ impl<'a, V: Value> Store<'a, V> {
             return Err(err_fn());
         }
         *self.initialized = true;
+        log::trace!("initialized {:p} via finalize", self.initialized);
         Ok(())
     }
 
@@ -127,6 +128,7 @@ impl<'a, V: Value> Store<'a, V> {
             }
             *self.initialized = true;
         }
+        log::trace!("initialized {:p} via push", self.initialized);
     }
 
     #[inline]

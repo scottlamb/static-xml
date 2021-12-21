@@ -75,8 +75,6 @@ pub struct NamedField {
 // *
 #[doc(hidden)]
 pub struct StructVtable {
-    // TODO: rather than exposed fields, add unsafe constructor.
-    pub deserialize: Option<&'static de::DeserializeFn>,
     // TODO: finalize.
     pub elements: &'static [NamedField],
     pub attributes: &'static [NamedField],
