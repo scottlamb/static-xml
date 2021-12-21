@@ -47,7 +47,7 @@ fn vtable_field(struct_: &ElementStruct, field: &ElementField) -> TokenStream {
             // SAFETY: an assertion checks the struct's size doesn't exceed u32::MAX.
             offset: unsafe { ::static_xml::offset_of!(#ident, #fident) } as u32,
             field_kind: <#ty as ::static_xml::value::Field>::KIND,
-            vtable: <<#ty as ::static_xml::value::Field>::Value as ::static_xml::value::Value>::VTABLE,
+            vtable: <<#ty as ::static_xml::value::Field>::Value as ::static_xml::value::Value>::vtable,
             default: #default,
         }
     }
@@ -87,7 +87,7 @@ fn flattened_fields(struct_: &ElementStruct) -> Vec<TokenStream> {
                 ::static_xml::value::FlattenedField {
                     out_offset: ::static_xml::offset_of!(#ident, #fident) as u32,
                     scratch_offset: ::static_xml::offset_of!(Scratch, #field_scratch) as u32,
-                    vtable: <#ty as ::static_xml::value::Value>::VTABLE,
+                    vtable: <#ty as ::static_xml::value::Value>::vtable,
                 }
             })
         })
@@ -106,14 +106,15 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
     quote! {
         const _: () = assert!(std::mem::size_of::<#ident>() < u32::MAX as usize);
 
-        static VTABLE: &'static ::static_xml::value::StructVtable = &::static_xml::value::StructVtable {
-            elements: &[#(#elements,)*],
-            attributes: &[#(#attributes,)*],
-            text: None, // TODO
-            flattened: &[#(#flattened,)*],
-            initialized_offset: unsafe { ::static_xml::offset_of!(Scratch, initialized) },
-        };
+        #[inline]
         fn struct_vtable() -> &'static ::static_xml::value::StructVtable {
+            static VTABLE: &'static ::static_xml::value::StructVtable = &::static_xml::value::StructVtable {
+                elements: &[#(#elements,)*],
+                attributes: &[#(#attributes,)*],
+                text: None, // TODO
+                flattened: &[#(#flattened,)*],
+                initialized_offset: unsafe { ::static_xml::offset_of!(Scratch, initialized) },
+            };
             VTABLE
         }
 
@@ -141,14 +142,17 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
         }
 
         unsafe impl ::static_xml::value::Value for #ident {
-            const VTABLE: &'static ::static_xml::value::ValueVtable = &::static_xml::value::ValueVtable {
-                type_name: concat!(module_path!(), "::", stringify!(#ident)),
-                de: Some(::static_xml::de::Vtable {
-                    deserialize_into: ::static_xml::de::deserialize_into_via_raw::<#ident>,
-                    kind: ::static_xml::de::ValueKind::StructVisitor(struct_vtable),
-                    finalize_field,
-                }),
-            };
+            #[inline]
+            fn vtable() -> &'static ::static_xml::value::ValueVtable {
+                &::static_xml::value::ValueVtable {
+                    type_name: concat!(module_path!(), "::", stringify!(#ident)),
+                    de: Some(::static_xml::de::Vtable {
+                        deserialize_into: ::static_xml::de::deserialize_into_via_raw::<#ident>,
+                        kind: ::static_xml::de::ValueKind::StructVisitor(struct_vtable),
+                        finalize_field,
+                    }),
+                }
+            }
         }
     }
 }

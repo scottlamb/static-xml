@@ -18,8 +18,8 @@ struct Foo {
     #[static_xml(prefix = "bar", rename = "blah")]
     string: Vec<String>,
 
-    //#[static_xml(flatten)]
-    //bar: Bar,
+    #[static_xml(flatten)]
+    bar: Bar,
     text: String,
 
     constrained: ConstrainedString,
@@ -116,9 +116,9 @@ fn deserialize() {
         Foo {
             mybool: true,
             string: vec!["foo".to_owned(), "bar".to_owned()],
-            //bar: Bar {
-            //    more: "more".to_owned()
-            //},
+            bar: Bar {
+                more: "more".to_owned()
+            },
             text: "asdf".to_owned(),
             constrained: ConstrainedString::Foo,
             choice: MyChoice::Foo("blah".to_owned()),
@@ -132,9 +132,9 @@ fn round_trip() {
     let original = Foo {
         mybool: true,
         string: vec!["foo".to_owned(), "bar".to_owned()],
-        //bar: Bar {
-        //    more: "more".to_owned(),
-        //},
+        bar: Bar {
+            more: "more".to_owned(),
+        },
         text: "asdf".to_owned(),
         constrained: ConstrainedString::Foo,
         choice: MyChoice::Foo("blah".to_owned()),

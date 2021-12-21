@@ -7,9 +7,10 @@ use crate::{de, ExpandedNameRef};
 /// The vtable allows type-erased handling of these values, including
 /// serialization and/or deserialization.
 pub unsafe trait Value: 'static {
-    const VTABLE: &'static ValueVtable;
+    fn vtable() -> &'static ValueVtable;
 }
 
+#[derive(Debug)]
 pub struct ValueVtable {
     /// A name for this type, which is not guaranteed to be unique.
     ///
@@ -98,13 +99,13 @@ impl StructVtable {
 pub struct FlattenedField {
     pub out_offset: u32,
     pub scratch_offset: u32,
-    pub vtable: &'static ValueVtable,
+    pub vtable: fn() -> &'static ValueVtable,
 }
 
 pub struct StructVtableField {
     pub offset: u32,
     pub field_kind: FieldKind,
-    pub vtable: &'static ValueVtable,
+    pub vtable: fn() -> &'static ValueVtable,
     pub default: *const (),
 }
 unsafe impl Send for StructVtableField {}

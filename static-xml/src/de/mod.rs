@@ -696,7 +696,7 @@ pub trait ElementField: Field {
         child: ElementReader<'_>,
     ) -> Result<(), VisitorError> {
         let store = ErasedStore::new(
-            <Self as Field>::Value::VTABLE,
+            <Self as Field>::Value::vtable(),
             &mut *(field.as_mut_ptr() as *mut ()),
             <Self as Field>::KIND,
             initialized,
@@ -704,7 +704,7 @@ pub trait ElementField: Field {
 
         // TODO: use the Deserialize trait, avoid the dynamic dispatch?
         // TODO: enforce with trait `de` is `Some`, switch to unwrap_unchecked to reduce code size.
-        let de_vtable = <Self as Field>::Value::VTABLE.de.as_ref().unwrap();
+        let de_vtable = <Self as Field>::Value::vtable().de.as_ref().unwrap();
         (de_vtable.deserialize_into)(child, store)
     }
 
@@ -716,14 +716,14 @@ pub trait ElementField: Field {
         default: *const (), //Option<fn() -> Self>,
     ) -> Result<(), VisitorError> {
         let field = ErasedStore::new(
-            <Self as Field>::Value::VTABLE,
+            <Self as Field>::Value::vtable(),
             &mut *(field.as_mut_ptr() as *mut ()),
             <Self as Field>::KIND,
             initialized,
         );
 
         // TODO: enforce with trait `de` is `Some`, switch to unwrap_unchecked to reduce code size.
-        let de_vtable = <Self as Field>::Value::VTABLE
+        let de_vtable = <Self as Field>::Value::vtable()
             .de
             .as_ref()
             .unwrap_unchecked();
@@ -758,6 +758,21 @@ pub struct Vtable {
     pub deserialize_into: DeserializeIntoFn,
     pub finalize_field: FinalizeFieldFn,
 }
+impl std::fmt::Debug for Vtable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Vtable")
+            .field("kind", &self.kind)
+            .field(
+                "deserialize_into",
+                &format!("{:p}", self.deserialize_into as *const ()),
+            )
+            .field(
+                "finalize_field",
+                &format!("{:p}", self.finalize_field as *const ()),
+            )
+            .finish()
+    }
+}
 
 // TODO: use tagged pointers to save a word per type?
 // (there are several bigger improvements we can make to StructVtable first though.)
@@ -777,6 +792,22 @@ pub enum ValueKind {
     CustomVisitor(&'static dyn RawDeserializeImpl<Out = (), Scratch = ()>),
     CustomDeserialize,
     Parse(ParseIntoFn),
+}
+impl std::fmt::Debug for ValueKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StructVisitor(arg0) => f.debug_tuple("StructVisitor").field(arg0).finish(),
+            Self::CustomVisitor(arg0) => f
+                .debug_tuple("CustomVisitor")
+                .field(&format!("{:p}", *arg0))
+                .finish(),
+            Self::CustomDeserialize => write!(f, "CustomDeserialize"),
+            Self::Parse(arg0) => f
+                .debug_tuple("Parse")
+                .field(&format!("{:p}", *arg0 as *const ()))
+                .finish(),
+        }
+    }
 }
 
 impl Vtable {
@@ -807,6 +838,7 @@ impl Vtable {
     }
 
     unsafe fn init_scratch(&self, scratch: *mut u8) {
+        log::trace!("init_scratch {:p}", scratch);
         let s = match self.kind {
             ValueKind::StructVisitor(s) => s(),
             ValueKind::CustomVisitor(c) => {
@@ -831,7 +863,7 @@ impl Vtable {
 
         for f in s.flattened {
             let f_scratch = scratch.add(f.scratch_offset as usize);
-            f.vtable.de.as_ref().unwrap().init_scratch(f_scratch);
+            (f.vtable)().de.as_ref().unwrap().init_scratch(f_scratch);
         }
     }
 
@@ -867,14 +899,19 @@ macro_rules! text_vtables {
                 store.into_store::<$t>().finalize(default_fn, err_fn)
             }
             unsafe impl $crate::value::Value for $t {
-                const VTABLE: &'static $crate::value::ValueVtable = &$crate::value::ValueVtable {
-                    type_name: std::any::type_name::<$t>(),
-                    de: Some($crate::de::Vtable {
-                        kind: $crate::de::ValueKind::Parse(parse_into),
-                        deserialize_into,
-                        finalize_field,
-                    }),
-                };
+                #[inline]
+                fn vtable() -> &'static $crate::value::ValueVtable {
+                    static VTABLE: &'static $crate::value::ValueVtable =
+                        &$crate::value::ValueVtable {
+                            type_name: std::any::type_name::<$t>(),
+                            de: Some($crate::de::Vtable {
+                                kind: $crate::de::ValueKind::Parse(parse_into),
+                                deserialize_into,
+                                finalize_field,
+                            }),
+                        };
+                    VTABLE
+                }
             }
         };
         // TODO: likewise for attr, text.
@@ -902,22 +939,30 @@ macro_rules! custom_deserialize_vtable {
                 erased_store.into_store::<$t>().finalize(default_fn, err_fn)
             }
             unsafe impl $crate::value::Value for $t {
-                const VTABLE: &'static $crate::value::ValueVtable = &$crate::value::ValueVtable {
-                    type_name: std::any::type_name::<$t>(),
-                    de: Some($crate::de::Vtable {
-                        deserialize_into,
-                        kind: $crate::de::ValueKind::CustomVisitor(unsafe {
-                            ::std::mem::transmute::<
-                                &'static dyn $crate::de::RawDeserializeImpl<
-                                    Scratch = <$t as $crate::de::RawDeserialize>::Scratch,
-                                    Out = $t,
-                                >,
-                                &'static dyn $crate::de::RawDeserializeImpl<Scratch = (), Out = ()>,
-                            >($impl)
-                        }),
-                        finalize_field,
-                    }),
-                };
+                #[inline]
+                fn vtable() -> &'static $crate::value::ValueVtable {
+                    static VTABLE: &'static $crate::value::ValueVtable =
+                        &$crate::value::ValueVtable {
+                            type_name: std::any::type_name::<$t>(),
+                            de: Some($crate::de::Vtable {
+                                deserialize_into,
+                                kind: $crate::de::ValueKind::CustomVisitor(unsafe {
+                                    ::std::mem::transmute::<
+                                        &'static dyn $crate::de::RawDeserializeImpl<
+                                            Scratch = <$t as $crate::de::RawDeserialize>::Scratch,
+                                            Out = $t,
+                                        >,
+                                        &'static dyn $crate::de::RawDeserializeImpl<
+                                            Scratch = (),
+                                            Out = (),
+                                        >,
+                                    >($impl)
+                                }),
+                                finalize_field,
+                            }),
+                        };
+                    VTABLE
+                }
             }
         };
     };
@@ -1125,8 +1170,8 @@ impl<'a> StructVisitor<'a> {
     unsafe fn flattened_visitor(self, field: &FlattenedField) -> RawDeserializeVisitor {
         RawDeserializeVisitor {
             out: &mut *(self.out.add(field.out_offset as usize) as *mut ()),
-            scratch: &mut *(self.out.add(field.scratch_offset as usize) as *mut ()),
-            vtable: field.vtable.de.as_ref().unwrap().kind,
+            scratch: &mut *(self.scratch.add(field.scratch_offset as usize) as *mut ()),
+            vtable: (field.vtable)().de.as_ref().unwrap().kind,
         }
     }
 
@@ -1135,12 +1180,12 @@ impl<'a> StructVisitor<'a> {
         let mut i = 0;
         for nf in self.vtable.elements {
             let field = ErasedStore::new(
-                nf.field.vtable,
+                (nf.field.vtable)(),
                 &mut *(self.out.add(nf.field.offset as usize) as *mut ()),
                 nf.field.field_kind,
                 &mut initialized[i],
             );
-            (nf.field.vtable.de.as_ref().unwrap().finalize_field)(
+            ((nf.field.vtable)().de.as_ref().unwrap().finalize_field)(
                 field,
                 nf.field.default,
                 &|| VisitorError::missing_element(&nf.name),
@@ -1149,12 +1194,12 @@ impl<'a> StructVisitor<'a> {
         }
         for nf in self.vtable.attributes {
             let field = ErasedStore::new(
-                nf.field.vtable,
+                (nf.field.vtable)(),
                 &mut *(self.out.add(nf.field.offset as usize) as *mut ()),
                 nf.field.field_kind,
                 &mut initialized[i],
             );
-            (nf.field.vtable.de.as_ref().unwrap().finalize_field)(
+            ((nf.field.vtable)().de.as_ref().unwrap().finalize_field)(
                 field,
                 nf.field.default,
                 &|| VisitorError::missing_attribute(&nf.name),
@@ -1210,13 +1255,12 @@ impl<'a> StructVisitor<'a> {
         );
         let vtable_field = &self.vtable.attributes[field_i].field;
         let store = ErasedStore::new(
-            vtable_field.vtable,
+            (vtable_field.vtable)(),
             &mut *(self.out.add(vtable_field.offset as usize) as *mut ()),
             vtable_field.field_kind,
             initialized,
         );
-        vtable_field
-            .vtable
+        (vtable_field.vtable)()
             .de
             .as_ref()
             .unwrap()
@@ -1228,11 +1272,19 @@ impl<'a> StructVisitor<'a> {
         self,
         mut child: ElementReader<'r>,
     ) -> Result<Option<ElementReader<'r>>, VisitorError> {
-        let field_i = match my_find(&child.expanded_name(), &self.vtable.elements) {
+        let name = child.expanded_name();
+        let field_i = match my_find(&name, &self.vtable.elements) {
             Some(i) => i,
             None => {
+                log::trace!(
+                    "looking for flattened field to handle {}, scratch={:p}",
+                    &name,
+                    self.scratch
+                );
                 for field in self.vtable.flattened {
+                    log::trace!("field, offset={}", field.scratch_offset);
                     let mut visitor = self.flattened_visitor(field);
+                    log::trace!("visitor scratch={:p}", visitor.scratch);
                     match visitor.element(child)? {
                         Some(c) => child = c,
                         None => break,
@@ -1245,19 +1297,18 @@ impl<'a> StructVisitor<'a> {
         log::trace!(
             "element, scratch={:p} child={} => i={} initialized={}",
             self.scratch,
-            child.expanded_name(),
+            &name,
             field_i,
-            initialized
+            *initialized
         );
         let vtable_field = &self.vtable.elements[field_i].field;
         let store = ErasedStore::new(
-            vtable_field.vtable,
+            (vtable_field.vtable)(),
             &mut *(self.out.add(vtable_field.offset as usize) as *mut ()),
             vtable_field.field_kind,
             initialized,
         );
-        vtable_field
-            .vtable
+        (vtable_field.vtable)()
             .de
             .as_ref()
             .unwrap()
@@ -1333,8 +1384,13 @@ pub fn deserialize_via_raw<T: RawDeserialize>(
     let mut out = MaybeUninit::<T>::uninit();
     let mut scratch = MaybeUninit::<T::Scratch>::uninit();
     // TODO: use unwrap_unchecked to reduce code size?
-    let de = <T as Value>::VTABLE.de.as_ref().unwrap();
+    let de = <T as Value>::vtable().de.as_ref().unwrap();
     unsafe {
+        log::trace!(
+            "deserialize_via_raw on {}, scratch={:p}",
+            std::any::type_name::<T>(),
+            scratch.as_ptr()
+        );
         de.init_scratch(scratch.as_mut_ptr() as *mut u8);
         let mut visitor = RawDeserializeVisitor::new(&mut out, &mut scratch, de.kind);
         element.read_to(&mut visitor)?;

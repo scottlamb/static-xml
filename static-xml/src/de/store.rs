@@ -134,7 +134,7 @@ impl<'a, V: Value> Store<'a, V> {
     #[inline]
     pub fn into_erased(self) -> ErasedStore<'a> {
         ErasedStore {
-            value_type: V::VTABLE,
+            value_type: V::vtable(),
             field_kind: self.field_kind,
             ptr: self.ptr,
             initialized: self.initialized,
@@ -146,8 +146,12 @@ impl<'a, V: Value> Store<'a, V> {
 #[track_caller] // TODO: check track_caller's effect on code size.
 fn unerase_mismatch(erased_vtable: &'static ValueVtable, store_vtable: &'static ValueVtable) -> ! {
     panic!(
-        "Can't convert ErasedStore with value type {:?} into Store<{:?}>",
-        erased_vtable.type_name, store_vtable.type_name,
+        "Type mismatch on ErasedStore::into_store()\n\
+        \n\
+        Runtime type: {:p} {:#?}\n\
+        \n\
+        Compile-time type: {:p} {:#?}",
+        erased_vtable, erased_vtable, store_vtable, store_vtable,
     )
 }
 
@@ -189,9 +193,9 @@ impl<'a> ErasedStore<'a> {
     #[track_caller] // TODO: check track_caller's effect on code size.
     pub fn into_store<V: Value>(self) -> Store<'a, V> {
         // TODO: why aren't these the same pointer?
-        //if !std::ptr::eq(self.value_type, V::VTABLE) {
-        //    unerase_mismatch(self.value_type, V::VTABLE);
-        //}
+        if !std::ptr::eq(self.value_type, V::vtable()) {
+            unerase_mismatch(self.value_type, V::vtable());
+        }
         Store {
             ptr: self.ptr,
             _phantom: PhantomData,
