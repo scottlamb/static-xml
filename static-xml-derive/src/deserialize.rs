@@ -276,6 +276,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                     #(#uninitialized_match_arms,)*
                     _ => return Ok(Some(child)),
                 });
+                log::info!("...initializing scratch {:p}", scratch);
                 *scratch = true;
                 Ok(None)
             }

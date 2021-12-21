@@ -80,9 +80,23 @@ struct Bar {
     more: String,
 }
 
+/// Sets up the logger, and does some debugging.
+///
+/// It can be tricky to actually see the logs when running tests through `miri`:
+/// ```text
+/// MIRIFLAGS="-Zmiri-disable-isolation" RUST_LOG=trace cargo miri test --test element_enum deserialize_simple -- --nocapture
+/// ```
+fn init() {
+    eprintln!("RUST_LOG={:?}", std::env::var("RUST_LOG"));
+    let _ = env_logger::Builder::from_default_env()
+        .is_test(true)
+        .try_init();
+    log::trace!("trace log entry");
+}
+
 #[test]
 fn deserialize() {
-    let _ = env_logger::builder().is_test(true).try_init();
+    init();
     let foo: Foo = static_xml::de::read(
         &br#"
         <?xml version="1.0"?>
@@ -114,7 +128,7 @@ fn deserialize() {
 
 #[test]
 fn round_trip() {
-    let _ = env_logger::builder().is_test(true).try_init();
+    init();
     let original = Foo {
         mybool: true,
         string: vec!["foo".to_owned(), "bar".to_owned()],
@@ -133,7 +147,7 @@ fn round_trip() {
 
 #[test]
 fn parse_str_variants() {
-    let _ = env_logger::Builder::new().is_test(true).try_init();
+    init();
     use static_xml::de::ParseText;
     assert_eq!(
         ConstrainedString::parse("Foo".to_owned()).unwrap(),

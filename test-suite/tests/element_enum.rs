@@ -25,9 +25,23 @@ struct OtherIndirectFlatten {
     field: Vec<String>,
 }
 
+/// Sets up the logger, and does some debugging.
+///
+/// It can be tricky to actually see the logs when running tests through `miri`:
+/// ```text
+/// MIRIFLAGS="-Zmiri-disable-isolation" RUST_LOG=trace cargo miri test --test element_enum deserialize_simple -- --nocapture
+/// ```
+fn init() {
+    eprintln!("RUST_LOG={:?}", std::env::var("RUST_LOG"));
+    let _ = env_logger::Builder::from_default_env()
+        .is_test(true)
+        .try_init();
+    log::trace!("trace log entry");
+}
+
 #[test]
 fn deserialize_simple() {
-    let _ = env_logger::Builder::new().is_test(true).try_init();
+    init();
     let holder: Holder = static_xml::de::from_str(
         r#"
         <?xml version="1.0"?>
@@ -52,7 +66,7 @@ fn deserialize_simple() {
 
 #[test]
 fn deserialize_vec() {
-    let _ = env_logger::Builder::new().is_test(true).try_init();
+    init();
     let holder: Holder = static_xml::de::from_str(
         r#"
         <?xml version="1.0"?>
@@ -78,7 +92,7 @@ fn deserialize_vec() {
 
 #[test]
 fn deserialize_mix_error() {
-    let _ = env_logger::Builder::new().is_test(true).try_init();
+    init();
     let e = static_xml::de::from_str::<Holder>(
         r#"
         <?xml version="1.0"?>
