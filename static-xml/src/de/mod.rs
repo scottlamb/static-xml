@@ -14,7 +14,7 @@ use xml::{
     reader::XmlEvent,
 };
 
-use crate::value::{Field, NamedField, StructVtable, Value};
+use crate::value::{Field, FlattenedField, NamedField, StructVtable, Value};
 use crate::ExpandedNameRef;
 
 pub use self::store::ErasedStore;
@@ -805,6 +805,37 @@ impl Vtable {
             _ => unreachable!(),
         }
     }
+
+    unsafe fn init_scratch(&self, scratch: *mut u8) {
+        let s = match self.kind {
+            ValueKind::StructVisitor(s) => s(),
+            ValueKind::CustomVisitor(c) => {
+                return c.init_scratch(&mut *(scratch as *mut MaybeUninit<()>))
+            }
+            ValueKind::Parse(_) => todo!(),
+            ValueKind::CustomDeserialize => unreachable!(),
+        };
+
+        // You'd think there'd be a simple fill on a MaybeUninit slice? But
+        // https://doc.rust-lang.org/reference/types/boolean.html
+        // guarantees false is 0 so let's do this:
+        std::ptr::write_bytes(
+            scratch.add(s.initialized_offset) as *mut bool,
+            0,
+            s.n_fields(),
+        );
+
+        if let Some((text_offset, _)) = s.text {
+            std::ptr::write(scratch.add(text_offset) as *mut String, String::new());
+        }
+
+        for f in s.flattened {
+            let f_scratch = scratch.add(f.scratch_offset as usize);
+            f.vtable.de.as_ref().unwrap().init_scratch(f_scratch);
+        }
+    }
+
+    // TODO: drop_scratch_in_place.
 }
 
 #[doc(hidden)]
@@ -922,7 +953,7 @@ pub unsafe trait RawDeserialize: Deserialize + Value {
 }
 
 #[allow(unused_variables)]
-pub unsafe trait RawDeserializeImpl {
+pub unsafe trait RawDeserializeImpl: Send + Sync {
     type Out;
     type Scratch;
 
@@ -962,39 +993,6 @@ pub unsafe trait RawDeserializeImpl {
         out: &mut MaybeUninit<Self::Out>,
         scratch: &mut Self::Scratch,
     ) -> Result<(), VisitorError>;
-}
-
-impl ValueKind {
-    unsafe fn init_scratch(&self, scratch: *mut u8) {
-        let s = match self {
-            ValueKind::StructVisitor(s) => s(),
-            ValueKind::CustomVisitor(c) => {
-                return c.init_scratch(&mut *(scratch as *mut MaybeUninit<()>))
-            }
-            ValueKind::Parse(_) => todo!(),
-            ValueKind::CustomDeserialize => unreachable!(),
-        };
-
-        // You'd think there'd be a simple fill on a MaybeUninit slice? But
-        // https://doc.rust-lang.org/reference/types/boolean.html
-        // guarantees false is 0 so let's do this:
-        std::ptr::write_bytes(
-            scratch.add(s.initialized_offset) as *mut bool,
-            0,
-            s.n_fields(),
-        );
-
-        if let Some((text_offset, _)) = s.text {
-            std::ptr::write(scratch.add(text_offset) as *mut String, String::new());
-        }
-
-        /*for f in s.flattened {
-            let f_scratch = scratch.add(f.0);
-            f.1.init_scratch(f_scratch);
-        }*/
-    }
-
-    // TODO: drop_scratch_in_place.
 }
 
 pub struct RawDeserializeVisitor<'a> {
@@ -1124,6 +1122,14 @@ impl<'a> StructVisitor<'a> {
         )
     }
 
+    unsafe fn flattened_visitor(self, field: &FlattenedField) -> RawDeserializeVisitor {
+        RawDeserializeVisitor {
+            out: &mut *(self.out.add(field.out_offset as usize) as *mut ()),
+            scratch: &mut *(self.out.add(field.scratch_offset as usize) as *mut ()),
+            vtable: field.vtable.de.as_ref().unwrap().kind,
+        }
+    }
+
     unsafe fn finalize(self) -> Result<(), VisitorError> {
         let initialized = self.initialized();
         let mut i = 0;
@@ -1169,19 +1175,30 @@ impl<'a> StructVisitor<'a> {
                 &|| panic!("missing text; does this even make sense?"),
             )?;
         }*/
-        // TODO: finalize flatten fields!
-        //assert_eq!(self.vtable.flattened.len(), 0);
+        for field in self.vtable.flattened {
+            let visitor = self.flattened_visitor(field);
+            visitor.finalize()?;
+        }
         Ok(())
     }
 
     unsafe fn attribute(
         self,
         name: &ExpandedNameRef<'_>,
-        value: String,
+        mut value: String,
     ) -> Result<Option<String>, VisitorError> {
         let field_i = match my_find(name, &self.vtable.attributes) {
             Some(i) => i,
-            None => return Ok(Some(value)), // TODO: handle flattened fields.
+            None => {
+                for field in self.vtable.flattened {
+                    let mut visitor = self.flattened_visitor(field);
+                    match visitor.attribute(name, value)? {
+                        Some(v) => value = v,
+                        None => break,
+                    }
+                }
+                return Ok(None);
+            }
         };
         let initialized = &mut self.initialized()[self.vtable.elements.len() + field_i];
         log::trace!(
@@ -1209,11 +1226,20 @@ impl<'a> StructVisitor<'a> {
 
     unsafe fn element<'r>(
         self,
-        child: ElementReader<'r>,
+        mut child: ElementReader<'r>,
     ) -> Result<Option<ElementReader<'r>>, VisitorError> {
         let field_i = match my_find(&child.expanded_name(), &self.vtable.elements) {
             Some(i) => i,
-            None => return Ok(Some(child)), // TODO: handle flattened fields.
+            None => {
+                for field in self.vtable.flattened {
+                    let mut visitor = self.flattened_visitor(field);
+                    match visitor.element(child)? {
+                        Some(c) => child = c,
+                        None => break,
+                    }
+                }
+                return Ok(None);
+            }
         };
         let initialized = &mut self.initialized()[field_i];
         log::trace!(
@@ -1309,7 +1335,7 @@ pub fn deserialize_via_raw<T: RawDeserialize>(
     // TODO: use unwrap_unchecked to reduce code size?
     let de = <T as Value>::VTABLE.de.as_ref().unwrap();
     unsafe {
-        de.kind.init_scratch(scratch.as_mut_ptr() as *mut u8);
+        de.init_scratch(scratch.as_mut_ptr() as *mut u8);
         let mut visitor = RawDeserializeVisitor::new(&mut out, &mut scratch, de.kind);
         element.read_to(&mut visitor)?;
         RawDeserializeVisitor::finalize(visitor)?;

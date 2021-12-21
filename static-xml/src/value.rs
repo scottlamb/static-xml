@@ -82,8 +82,7 @@ pub struct StructVtable {
     /// Offset within scratch and field for text, if any.
     pub text: Option<(usize, StructVtableField)>,
 
-    /// Offsets within scratch and vtables of flattened fields.
-    //pub flattened: &'static [(usize, Mode)],
+    pub flattened: &'static [FlattenedField],
 
     /// Offset within scratch of the initialized array.
     pub initialized_offset: usize,
@@ -96,7 +95,12 @@ impl StructVtable {
     }
 }
 
-#[doc(hidden)]
+pub struct FlattenedField {
+    pub out_offset: u32,
+    pub scratch_offset: u32,
+    pub vtable: &'static ValueVtable,
+}
+
 pub struct StructVtableField {
     pub offset: u32,
     pub field_kind: FieldKind,

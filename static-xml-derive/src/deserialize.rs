@@ -9,21 +9,6 @@ use syn::{spanned::Spanned, Data};
 
 use crate::common::{ElementEnum, ElementField, ElementFieldMode, ElementStruct, Errors};
 
-pub(crate) fn quote_flatten_visitors(struct_: &ElementStruct) -> Vec<TokenStream> {
-    struct_
-        .fields
-        .iter()
-        .filter_map(|f| {
-            if matches!(f.mode, ElementFieldMode::Flatten) {
-                let field_visitor = format_ident!("{}_visitor", f.ident);
-                Some(quote_spanned! { f.inner.ident.span() => &mut self.#field_visitor })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
 fn flattened_field_definitions(struct_: &ElementStruct) -> Vec<TokenStream> {
     struct_
         .fields
@@ -85,14 +70,38 @@ fn named_fields(struct_: &ElementStruct, sorted: &[usize]) -> Vec<TokenStream> {
         .collect()
 }
 
+fn flattened_fields(struct_: &ElementStruct) -> Vec<TokenStream> {
+    struct_
+        .fields
+        .iter()
+        .filter_map(|f| {
+            if !matches!(f.mode, ElementFieldMode::Flatten) {
+                return None;
+            }
+            let ident = &struct_.input.ident;
+            let span = f.inner.span();
+            let fident = f.ident;
+            let ty = &f.inner.ty;
+            let field_scratch = format_ident!("{}_scratch", f.ident);
+            Some(quote_spanned! {span =>
+                ::static_xml::value::FlattenedField {
+                    out_offset: ::static_xml::offset_of!(#ident, #fident) as u32,
+                    scratch_offset: ::static_xml::offset_of!(Scratch, #field_scratch) as u32,
+                    vtable: <#ty as ::static_xml::value::Value>::VTABLE,
+                }
+            })
+        })
+        .collect()
+}
+
 fn do_struct(struct_: &ElementStruct) -> TokenStream {
     let attributes = named_fields(&struct_, &struct_.sorted_attributes[..]);
     let elements = named_fields(&struct_, &struct_.sorted_elements[..]);
+    let flattened = flattened_fields(&struct_);
 
     let ident = &struct_.input.ident;
 
-    let _flattened_field_definitions = flattened_field_definitions(&struct_);
-    let _flatten_visitors = quote_flatten_visitors(&struct_);
+    let flattened_field_definitions = flattened_field_definitions(&struct_);
     let n_fields = elements.len() + attributes.len(); // TODO: text.
     quote! {
         const _: () = assert!(std::mem::size_of::<#ident>() < u32::MAX as usize);
@@ -101,7 +110,7 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
             elements: &[#(#elements,)*],
             attributes: &[#(#attributes,)*],
             text: None, // TODO
-            // TODO: flattened.
+            flattened: &[#(#flattened,)*],
             initialized_offset: unsafe { ::static_xml::offset_of!(Scratch, initialized) },
         };
         fn struct_vtable() -> &'static ::static_xml::value::StructVtable {
@@ -115,7 +124,7 @@ fn do_struct(struct_: &ElementStruct) -> TokenStream {
         pub struct Scratch {
             // text_buf: String, // TODO: can omit if there's no text field.
             initialized: [bool; #n_fields],
-            // #(#flattened_field_definitions, )*
+            #(#flattened_field_definitions, )*
         }
 
         unsafe impl ::static_xml::de::RawDeserialize for #ident {
@@ -236,6 +245,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
             type Scratch = bool; // if Out is initialized
 
             fn init_scratch(&self, scratch: &mut ::std::mem::MaybeUninit<Self::Scratch>) {
+                log::info!("initializing scratch {:p}", scratch);
                 scratch.write(false);
             }
 
@@ -248,6 +258,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                 let name = child.expanded_name();
                 let element_i = ::static_xml::de::find(&name, ELEMENTS);
                 if *scratch {
+                    log::info!("element; scratch {:p} says initialized, child={}", scratch, &name);
                     // SAFETY: self.out is initialized when scratch is true.
                     let expected_i = match out.assume_init_mut() {
                         #(#initialized_match_arms,)*
@@ -260,6 +271,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                     }
                     return Ok(None);
                 }
+                log::info!("element; scratch {:p} says uninitialized, child={}", scratch, &name);
                 out.write(match element_i {
                     #(#uninitialized_match_arms,)*
                     _ => return Ok(Some(child)),
@@ -274,6 +286,7 @@ fn do_enum(enum_: &ElementEnum) -> TokenStream {
                 scratch: &mut Self::Scratch,
                 // TODO: default?
             ) -> Result<(), ::static_xml::de::VisitorError> {
+                log::info!("finalize; scratch {:p} = {}", scratch, *scratch);
                 if !*scratch {
                     //if let Some(d) = default {
                     //    self.out.write(d());
