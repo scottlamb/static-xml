@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use proc_macro2::TokenStream;
-use quote::quote_spanned;
+use quote::{quote, quote_spanned};
 use syn::Data;
 
 use crate::common::{
-    Errors, RestrictionVariant, TextEnum, TextEnumMode, TextVariantMode, UnionVariant,
+    Errors, RestrictionVariant, TextAttr, TextEnum, TextEnumMode, TextMode, TextVariantMode,
+    UnionVariant,
 };
 
 fn do_enum(enum_: TextEnum) -> TokenStream {
@@ -65,9 +66,33 @@ fn do_restriction(enum_: &TextEnum, variants: &[RestrictionVariant]) -> TokenStr
     }
 }
 
+fn do_std(ident: &proc_macro2::Ident) -> TokenStream {
+    quote! {
+        impl ::static_xml::ser::ToText for #ident {
+            fn to_text(&self) -> Result<String, ::static_xml::ser::Error> {
+                Ok(::std::string::ToString::to_string(self))
+            }
+        }
+    }
+}
+
 pub(crate) fn derive(errors: &Errors, input: syn::DeriveInput) -> Result<TokenStream, ()> {
+    let attr = TextAttr::new(errors, &input);
+    match attr.mode {
+        None => {
+            errors.push(syn::Error::new_spanned(
+                input.ident,
+                "static_xml(mode) must be specified for text types",
+            ));
+            return Err(());
+        }
+        Some(TextMode::Std) => {
+            return Ok(do_std(&input.ident));
+        }
+        _ => {}
+    }
     match input.data {
-        Data::Enum(ref data) => Ok(do_enum(TextEnum::new(&errors, &input, data))),
+        Data::Enum(ref data) => Ok(do_enum(TextEnum::new(&errors, &input, attr, data))),
         _ => {
             errors.push(syn::Error::new_spanned(
                 input.ident,

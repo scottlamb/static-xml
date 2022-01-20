@@ -72,10 +72,16 @@ pub(crate) struct UnionVariant<'a> {
     pub(crate) ty: &'a syn::Type,
 }
 
-impl<'a> TextEnum<'a> {
-    pub(crate) fn new(errors: &Errors, input: &'a DeriveInput, enum_: &'a syn::DataEnum) -> Self {
+/// Parsed top-level attributes for a text type (whether `struct` or `enum`).
+pub(crate) struct TextAttr {
+    pub(crate) whitespace: WhiteSpace,
+    pub(crate) mode: Option<TextMode>,
+}
+
+impl TextAttr {
+    pub(crate) fn new(errors: &Errors, input: &DeriveInput) -> Self {
         let mut whitespace = WhiteSpace::Preserve;
-        let mut union_mode = false;
+        let mut mode = None;
         for item in get_meta_items(errors, &input.attrs) {
             match &item {
                 NestedMeta::Meta(Meta::NameValue(nv @ MetaNameValue { ref path, .. }))
@@ -86,25 +92,55 @@ impl<'a> TextEnum<'a> {
                 NestedMeta::Meta(Meta::NameValue(nv @ MetaNameValue { ref path, .. }))
                     if path.is_ident("mode") =>
                 {
+                    if mode.is_some() {
+                        errors.push(syn::Error::new_spanned(nv, "redundant mode"));
+                        continue;
+                    }
                     with_lit_str(errors, nv, &mut |l| match l.value().as_str() {
-                        "restriction" => union_mode = false,
-                        "union" => union_mode = true,
-                        _ => {
-                            errors.push(syn::Error::new_spanned(l, "expected restriction or union"))
-                        }
+                        "std" => mode = Some(TextMode::Std),
+                        "restriction" => mode = Some(TextMode::Restriction),
+                        "union" => mode = Some(TextMode::Union),
+                        _ => errors.push(syn::Error::new_spanned(l, "unknown mode")),
                     });
                 }
                 i => errors.push(syn::Error::new_spanned(i, "item not understood")),
             }
         }
-        let mode = match union_mode {
-            false => Self::parse_restriction_fields(errors, enum_),
-            true => Self::parse_union_fields(errors, enum_),
+        Self { whitespace, mode }
+    }
+}
+
+pub(crate) enum TextMode {
+    /// Use adapters over `std` traits.
+    ///
+    /// *   `ParseText` will be implemented via [`std::str::FromStr`].
+    ///     The `FromStr::Err` type must implement `std::error::Error + Send + Sync`.
+    /// *   `ToText` will be implemented via [`std::string::ToString`].
+    Std,
+
+    /// Restriction type, for enums only. See [`TextEnumMode::Restriction`].
+    Restriction,
+
+    /// Union type, for enums only. See [`TextEnumMode::Union`].
+    Union,
+}
+
+impl<'a> TextEnum<'a> {
+    pub(crate) fn new(
+        errors: &Errors,
+        input: &'a DeriveInput,
+        attr: TextAttr,
+        enum_: &'a syn::DataEnum,
+    ) -> Self {
+        let mode = match attr.mode {
+            Some(TextMode::Restriction) => Self::parse_restriction_fields(errors, enum_),
+            Some(TextMode::Union) => Self::parse_union_fields(errors, enum_),
+            _ => unreachable!("TextEnum expects caller to validate mode is restriction or union"),
         };
         TextEnum {
             input,
             mode,
-            whitespace,
+            whitespace: attr.whitespace,
         }
     }
 

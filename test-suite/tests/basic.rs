@@ -27,7 +27,7 @@ struct Foo {
 }
 
 #[derive(Debug, Eq, PartialEq, ParseText, ToText)]
-#[static_xml(whitespace = "collapse")]
+#[static_xml(mode = "restriction", whitespace = "collapse")]
 enum ConstrainedString {
     Foo,
     Bar,
@@ -37,7 +37,7 @@ enum ConstrainedString {
 }
 
 #[derive(Debug, ParseText, Eq, PartialEq, ToText)]
-#[static_xml(whitespace = "collapse")]
+#[static_xml(mode = "restriction", whitespace = "collapse")]
 enum UnconstrainedString {
     #[static_xml(rename = "foo")]
     Foo,

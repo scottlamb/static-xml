@@ -9,7 +9,8 @@ use static_xml::de::WhiteSpace;
 use syn::Data;
 
 use crate::common::{
-    Errors, RestrictionVariant, TextEnum, TextEnumMode, TextVariantMode, UnionVariant,
+    Errors, RestrictionVariant, TextAttr, TextEnum, TextEnumMode, TextMode, TextVariantMode,
+    UnionVariant,
 };
 
 fn do_enum(enum_: TextEnum) -> TokenStream {
@@ -94,6 +95,19 @@ fn do_restriction(
     }
 }
 
+fn do_std(ident: &proc_macro2::Ident, attr: &TextAttr) -> TokenStream {
+    let normalize = normalize(attr.whitespace);
+    quote! {
+        impl ::static_xml::de::ParseText for #ident {
+            fn parse(text: String) -> Result<Self, ::static_xml::BoxedStdError> {
+                #normalize
+                ::std::str::FromStr::from_str(text.as_str())
+                    .map_err(|e| Box::new(e) as ::static_xml::BoxedStdError)
+            }
+        }
+    }
+}
+
 fn normalize(whitespace: WhiteSpace) -> TokenStream {
     match whitespace {
         WhiteSpace::Preserve => TokenStream::new(),
@@ -107,8 +121,22 @@ fn normalize(whitespace: WhiteSpace) -> TokenStream {
 }
 
 pub(crate) fn derive(errors: &Errors, input: syn::DeriveInput) -> Result<TokenStream, ()> {
+    let attr = TextAttr::new(errors, &input);
+    match attr.mode {
+        None => {
+            errors.push(syn::Error::new_spanned(
+                input.ident,
+                "static_xml(mode) must be specified for text types",
+            ));
+            return Err(());
+        }
+        Some(TextMode::Std) => {
+            return Ok(do_std(&input.ident, &attr));
+        }
+        _ => {}
+    }
     match input.data {
-        Data::Enum(ref data) => Ok(do_enum(TextEnum::new(errors, &input, data))),
+        Data::Enum(ref data) => Ok(do_enum(TextEnum::new(errors, &input, attr, data))),
         _ => {
             errors.push(syn::Error::new_spanned(
                 input.ident,
