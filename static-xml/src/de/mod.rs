@@ -1136,6 +1136,12 @@ impl<T: ParseText> Deserialize for T {
 mod tests {
     use super::*;
 
+    #[test]
+    fn error_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Error>();
+    }
+
     #[derive(Debug, Default, Eq, PartialEq)]
     struct Dummy;
 

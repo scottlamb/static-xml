@@ -527,5 +527,5 @@ impl std::fmt::Display for ExpandedName {
     }
 }
 
-/// Shorthand for `Box<dyn std::error::Error + 'static>`.
-pub type BoxedStdError = Box<dyn std::error::Error + 'static>;
+/// Shorthand for `Box<dyn std::error::Error + Send + Sync + 'static>`.
+pub type BoxedStdError = Box<dyn std::error::Error + Send + Sync + 'static>;
