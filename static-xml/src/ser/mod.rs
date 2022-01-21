@@ -715,6 +715,9 @@ impl<'a> Serializer<'a> {
 }
 
 /// Serializes the given element with its default name.
+///
+/// This requires the supplied value implement [`SerializeRoot`]. If it does
+/// not, see [`serialize_with_name`] instead.
 #[inline]
 pub fn serialize<R: SerializeRoot>(root: &R) -> Serializer {
     Serializer {
@@ -725,6 +728,10 @@ pub fn serialize<R: SerializeRoot>(root: &R) -> Serializer {
 }
 
 /// Serializes the given element with the chosen name.
+///
+/// Unlike [`serialize`], this doesn't require the supplied value implement
+/// [`SerializeRoot`]. It can be used with any [`Serialize`] implementation,
+/// including any [`ToText`] implementation.
 #[inline]
 pub fn serialize_with_name<'a>(
     element: &'a dyn Serialize,

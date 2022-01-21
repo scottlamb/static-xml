@@ -1,6 +1,10 @@
 // Copyright (C) 2021 Scott Lamb <slamb@slamb.org>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+//! Derive macros for [`static_xml`] crate.
+//!
+//! See `static_xml`'s crate-level documentation.
+
 mod common;
 mod deserialize;
 mod parse;

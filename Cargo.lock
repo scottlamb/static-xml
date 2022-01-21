@@ -125,6 +125,7 @@ dependencies = [
  "assert_matches",
  "env_logger",
  "log",
+ "static-xml-derive",
  "xml-rs",
 ]
 

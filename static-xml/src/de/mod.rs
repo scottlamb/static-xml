@@ -662,11 +662,12 @@ pub trait Deserialize: Sized {
 ///
 /// Typically used only via derive macros.
 ///
-/// For any `T` that implements [`Deserialize`,, there are three implementations
+/// For any `T` that implements [`Deserialize`], there are three implementations
 /// of this trait:
 ///
-/// 1. `T`, for mandatory singleton fields. In XML Schema terms, this
-///    is an element with the default `minOccurs="1" maxOccurs="1"`.
+/// 1. `T`, for singleton fields, which are mandatory unless a default is
+///     specified. In XML Schema terms, this is an element with the default
+///     `minOccurs="1" maxOccurs="1"`.
 /// 2. `Option<T>`, for optional singleton fields. In XML Schema terms,
 ///    `minOccurs="0" maxOccurs="1".
 /// 3. `Vec<T>`, for repeated fields. In XML Schema terms,
