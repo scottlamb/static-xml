@@ -3,7 +3,7 @@
 
 use static_xml_derive::{Deserialize, ParseText, Serialize, ToText};
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[static_xml(
     namespace = "foo: http://example.com/foo",
     namespace = "bar: http://example.com/bar",
@@ -16,9 +16,8 @@ struct Foo {
     #[static_xml(prefix = "bar", rename = "blah")]
     string: Vec<String>,
 
-    #[static_xml(flatten)]
-    bar: Bar,
-
+    //#[static_xml(flatten)]
+    //bar: Bar,
     text: String,
 
     constrained: ConstrainedString,
@@ -34,6 +33,11 @@ enum ConstrainedString {
 
     #[static_xml(rename = "BAZ")]
     Baz,
+}
+impl Default for ConstrainedString {
+    fn default() -> Self {
+        ConstrainedString::Foo
+    }
 }
 
 #[derive(Debug, ParseText, Eq, PartialEq, ToText)]
@@ -55,6 +59,11 @@ enum MyChoice {
     Baz(String),
     UnitValue,
 }
+impl Default for MyChoice {
+    fn default() -> Self {
+        MyChoice::UnitValue
+    }
+}
 
 #[derive(Debug, Eq, PartialEq, ParseText, ToText)]
 #[static_xml(mode = "union")]
@@ -64,7 +73,7 @@ enum MyUnion {
     String(String),
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct Bar {
     more: String,
 }
@@ -91,9 +100,9 @@ fn deserialize() {
         Foo {
             mybool: true,
             string: vec!["foo".to_owned(), "bar".to_owned()],
-            bar: Bar {
-                more: "more".to_owned()
-            },
+            //bar: Bar {
+            //    more: "more".to_owned()
+            //},
             text: "asdf".to_owned(),
             constrained: ConstrainedString::Foo,
             choice: MyChoice::Foo("blah".to_owned()),
@@ -107,9 +116,9 @@ fn round_trip() {
     let original = Foo {
         mybool: true,
         string: vec!["foo".to_owned(), "bar".to_owned()],
-        bar: Bar {
-            more: "more".to_owned(),
-        },
+        //bar: Bar {
+        //    more: "more".to_owned(),
+        //},
         text: "asdf".to_owned(),
         constrained: ConstrainedString::Foo,
         choice: MyChoice::Foo("blah".to_owned()),

@@ -3,52 +3,19 @@
 
 use static_xml_derive::{Deserialize, Serialize};
 
-#[derive(Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[static_xml(direct)]
-struct DirectHolder {
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct Holder {
     #[static_xml(flatten)]
-    direct_enum: DirectEnum,
-    #[static_xml(flatten)]
-    other_flatten: OtherDirectFlatten,
+    enum_: Enum,
+    //#[static_xml(flatten)]
+    //other_flatten: OtherFlatten,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[static_xml(direct)]
-enum DirectEnum {
+enum Enum {
     Simple(String),
     Vec(Vec<String>),
     Unit,
-    #[static_xml(skip)]
-    Skipped(String),
-}
-impl Default for DirectEnum {
-    fn default() -> Self {
-        DirectEnum::Skipped("default".to_owned())
-    }
-}
-
-#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[static_xml(direct)]
-struct OtherDirectFlatten {
-    field: Vec<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-struct IndirectHolder {
-    #[static_xml(flatten)]
-    indirect_enum: IndirectEnum,
-    #[static_xml(flatten)]
-    other_flatten: OtherIndirectFlatten,
-}
-
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
-enum IndirectEnum {
-    Simple(String),
-    Vec(Vec<String>),
-    Unit,
-    #[allow(dead_code)]
-    #[static_xml(skip)]
-    Skipped,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -57,9 +24,9 @@ struct OtherIndirectFlatten {
 }
 
 #[test]
-fn deserialize_indirect_simple() {
+fn deserialize_simple() {
     let _ = env_logger::Builder::new().is_test(true).try_init();
-    let indirect: IndirectHolder = static_xml::de::from_str(
+    let holder: Holder = static_xml::de::from_str(
         r#"
         <?xml version="1.0"?>
         <foo>
@@ -71,20 +38,20 @@ fn deserialize_indirect_simple() {
     )
     .unwrap();
     assert_eq!(
-        indirect,
-        IndirectHolder {
-            indirect_enum: IndirectEnum::Simple("asdf".to_owned()),
-            other_flatten: OtherIndirectFlatten {
+        holder,
+        Holder {
+            enum_: Enum::Simple("asdf".to_owned()),
+            /*other_flatten: OtherIndirectFlatten {
                 field: vec!["before".to_owned(), "after".to_owned()]
-            },
+            },*/
         }
     );
 }
 
 #[test]
-fn deserialize_indirect_vec() {
+fn deserialize_vec() {
     let _ = env_logger::Builder::new().is_test(true).try_init();
-    let indirect: IndirectHolder = static_xml::de::from_str(
+    let holder: Holder = static_xml::de::from_str(
         r#"
         <?xml version="1.0"?>
         <foo>
@@ -97,20 +64,20 @@ fn deserialize_indirect_vec() {
     )
     .unwrap();
     assert_eq!(
-        indirect,
-        IndirectHolder {
-            indirect_enum: IndirectEnum::Vec(vec!["foo".to_owned(), "bar".to_owned()]),
-            other_flatten: OtherIndirectFlatten {
+        holder,
+        Holder {
+            enum_: Enum::Vec(vec!["foo".to_owned(), "bar".to_owned()]),
+            /*other_flatten: OtherIndirectFlatten {
                 field: vec!["before".to_owned(), "after".to_owned()]
-            },
+            },*/
         }
     );
 }
 
 #[test]
-fn deserialize_indirect_mix_error() {
+fn deserialize_mix_error() {
     let _ = env_logger::Builder::new().is_test(true).try_init();
-    let e = static_xml::de::from_str::<IndirectHolder>(
+    let e = static_xml::de::from_str::<Holder>(
         r#"
         <?xml version="1.0"?>
         <foo>
