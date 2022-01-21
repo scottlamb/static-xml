@@ -2,10 +2,30 @@
 
 `static-xml` is a [`serde`](https://serde.rs/)-like serialization and
 deserialization library for XML, currently written as a layer on top of
-[`xml-rs`](https://crates.io/crates/xml-rs).
+[`xml-rs`](https://crates.io/crates/xml-rs). It is *inspired by* `serde`
+but is an entirely separate implementation rather than a `serde` data format.
 
-*Status:* in early development, docs mostly unwritten. Not yet recommended for
-use.
+*Status:* in early development. API is unstable.
+
+## Goals
+
+In order, roughly:
+
+1.  **sound.** `unsafe` is allowed, but never in a way that allows safe calling
+    code to violate soundness. It should be carefully reasoned and thoroughly
+    tested using tools such as `cargo miri test`.
+2.  **correct.** It should have a bug-free mapping of Rust types and XML
+    documents with no surprises. The APIs should be misuse-resistant.
+3.  **ergonomic.** The derive macros should be easy to use correctly, and they
+    should produce good error messages when used incorrectly.
+4.  **complete enough.** The `static-xml` crate should support any useful
+    format; the `static-xml-derive` macros should support most types.
+    See design notes below.
+5.  **light-weight.** It should produce reasonably small binaries and compile
+    quickly. This is a major concern for large XML schemas such as ONVIF.
+6.  **fast enough.** It should be as fast as possible without compromising
+    the goals above. The lowest-hanging fruit for improving performance are
+    likely in `xml-rs`, not in `static-xml` itself.
 
 ## Design notes
 
@@ -27,7 +47,11 @@ This library is divided into two crates:
     may need to bypass it for some types. For example, the `struct`s it supports
     don't have any way of conveying order between their fields. To make this
     concrete, when fed an XHTML document, deserialization would lose the
-    distinction between `<p>foo<i>bar</i>baz</p>` and `<p>foobar<i>baz</i></p>`.
+    distinction between `<p>foo<i>bar</i>baz</p>` and `<p>foobaz<i>bar</i></p>`.
+    Similarly, it doesn't support validating all the rules that might be
+    expressed in an XML schema. It can parse a schema described via
+    `<xs:sequence>`, but it won't produce an error if the elements aren't
+    written in the stated order.
 
 ### `xml-rs` vs `quick-xml` or other alternatives
 
@@ -131,7 +155,8 @@ to experiment with a different approach in which the `Visitor` impl is replaced
 with a table that holds the offset within `FooVisitor` of each field, and a
 pointer to an `element` function. The generated code would use `unsafe`, but
 soundness only has to be proved once in the generator, and this seems worthwhile
-if it can achieve significant code size reduction.
+if it can achieve significant code size reduction. See
+[#5](https://github.com/scottlamb/static-xml/issues/5).
 
 ## Comparison with other crates
 
@@ -198,7 +223,7 @@ necessary without wedging a square peg into a round hole.
 
 #### Error handling
 
-`yaserde`'s generated code will panic on invalid data, eg if a non-digit
+`yaserde`'s generated code will panic on invalid data, e.g. if a non-digit
 is found where an `i32` is expected:
 
 ```
@@ -229,7 +254,7 @@ deserialization interface and doesn't track the depth reliably.
 which solves these problems systematically, introducing a deserialization
 contract which is enforced by Rust's type system.
 
-`yaserde` also has several bugs including namespaces, eg
+`yaserde` also has several bugs involving namespaces, eg
 [#126](https://github.com/media-io/yaserde/issues/126), and enum element name
 comparisons ignoring the namespace entirely. These are believed to be addressed
 by `static-xml`, although many tests have yet to be written.
