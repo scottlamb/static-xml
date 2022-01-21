@@ -325,7 +325,7 @@
 //!
 //! <tr>
 //! <th>XML schema</th>
-//! <th>Rust<?th>
+//! <th>Rust</th>
 //! </tr>
 //!
 //! <tr>
