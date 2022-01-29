@@ -667,6 +667,7 @@ pub struct Serializer<'a> {
     element: &'a dyn Serialize,
     name: ExpandedNameRef<'a>,
     perform_indent: bool,
+    write_document_declaration: bool,
 }
 
 impl<'a> Serializer<'a> {
@@ -679,6 +680,16 @@ impl<'a> Serializer<'a> {
         }
     }
 
+    /// Sets if the document declaration at the beginning (<?xml ...>)
+    /// should be written.
+    #[inline]
+    pub fn write_document_declaration(self, write_document_declaration: bool) -> Self {
+        Self {
+            write_document_declaration,
+            ..self
+        }
+    }
+
     /// Serializes to any `Write` impl.
     pub fn to<W: Write>(self, writer: W) -> Result<(), Error> {
         let mut writer = WrappedWriter {
@@ -686,6 +697,7 @@ impl<'a> Serializer<'a> {
                 writer,
                 xml::writer::EmitterConfig {
                     perform_indent: self.perform_indent,
+                    write_document_declaration: self.write_document_declaration,
                     ..Default::default()
                 },
             ),
@@ -724,6 +736,7 @@ pub fn serialize<R: SerializeRoot>(root: &R) -> Serializer {
         element: root,
         name: root.root(),
         perform_indent: false,
+        write_document_declaration: true,
     }
 }
 
@@ -741,6 +754,7 @@ pub fn serialize_with_name<'a>(
         element,
         name,
         perform_indent: false,
+        write_document_declaration: true,
     }
 }
 
