@@ -19,3 +19,6 @@ syn = "1.0"
 
 [lib]
 proc-macro = true
+
+[dev-dependencies]
+trybuild = "1.0.71"
