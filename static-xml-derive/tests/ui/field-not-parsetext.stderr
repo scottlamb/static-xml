@@ -1,11 +1,11 @@
-error[E0277]: the trait bound `Foo: ParseText` is not satisfied
+error[E0277]: the trait bound `Foo: DeserializeElementField` is not satisfied
   --> tests/ui/field-not-parsetext.rs:10:5
    |
 8  | #[derive(Deserialize)]
    |          ----------- this tail expression is of type `&mut Foo`
 9  | struct Outer {
 10 |     foo: Foo,
-   |     ^^^^^^^^ the trait `ParseText` is not implemented for `Foo`
+   |     ^^^ the trait `ParseText` is not implemented for `Foo`, which is required by `Foo: DeserializeElementField`
    |
    = help: the following other types implement trait `ParseText`:
              String
@@ -20,11 +20,11 @@ error[E0277]: the trait bound `Foo: ParseText` is not satisfied
    = note: required for `Foo` to implement `Deserialize`
    = note: required for `Foo` to implement `DeserializeElementField`
 
-error[E0277]: the trait bound `Foo: ParseText` is not satisfied
-  --> tests/ui/field-not-parsetext.rs:10:5
+error[E0277]: the trait bound `Foo: DeserializeElementField` is not satisfied
+  --> tests/ui/field-not-parsetext.rs:10:10
    |
 10 |     foo: Foo,
-   |     ^^^^^^^^ the trait `ParseText` is not implemented for `Foo`
+   |          ^^^ the trait `ParseText` is not implemented for `Foo`, which is required by `Foo: DeserializeElementField`
    |
    = help: the following other types implement trait `ParseText`:
              String

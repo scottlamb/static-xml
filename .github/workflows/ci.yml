@@ -16,6 +16,7 @@ jobs:
         include:
           - rust: stable
             extra_components: rustfmt
+            extra_test_args: -p static-xml-derive
     runs-on: ubuntu-20.04
     steps:
     - name: Checkout
@@ -36,7 +37,7 @@ jobs:
         override: true
         components: ${{ matrix.extra_components }}
     - name: Test
-      run: cargo test --all-features
+      run: cargo test --all-features -p static-xml -p test-suite ${{ matrix.extra_test_args }}
     - name: Check formatting
       if: matrix.rust == 'stable'
       run: cargo fmt -- --check
