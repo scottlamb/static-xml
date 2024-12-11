@@ -92,9 +92,9 @@ fn finalize_visitor_fields(struct_: &ElementStruct) -> Vec<TokenStream> {
         let span = field.inner.span();
         let ty = &field.inner.ty;
         let default = field.default.then(|| {
-            Some(quote_spanned! {span=>
+            quote_spanned! {span=>
                 <#ty as ::std::default::Default>::default
-            })
+            }
         });
         match field.mode {
             ElementFieldMode::Element { sorted_elements_pos: p } => {
@@ -140,7 +140,7 @@ fn finalize_visitor_fields(struct_: &ElementStruct) -> Vec<TokenStream> {
                     <#ty as ::static_xml::de::RawDeserialize>::Visitor::finalize(self.#field_visitor, #d)?;
                 }
             }
-            ElementFieldMode::Text => todo!(),
+            ElementFieldMode::Text => todo!("text fields unimplemented"),
         }
     }).collect()
 }

@@ -38,7 +38,7 @@ impl Errors {
 
 impl Drop for Errors {
     fn drop(&mut self) {
-        if self.0.borrow().is_some() {
+        if self.0.borrow().is_some() && !std::thread::panicking() {
             panic!("Errors dropped without take_compile_errors call");
         }
     }
@@ -304,7 +304,7 @@ impl Namespaces {
                     if prefix == "xml" && url == "http://www.w3.org/XML/1998/namespace" {
                         return;
                     }
-                    todo!()
+                    todo!("unsupported special namespace combo prefix={prefix:?} url={url:?}")
                 }
                 self.add_internal(errors, nv, prefix_untrimmed.trim(), url_untrimmed);
             } else {

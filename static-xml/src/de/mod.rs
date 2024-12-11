@@ -1019,7 +1019,6 @@ impl<T: ParseText> DeserializeAttrField for Option<T> {
     }
 }
 
-
 impl ParseText for bool {
     fn parse(text: String) -> Result<Self, crate::BoxedStdError> {
         // [https://www.w3.org/TR/xmlschema11-2/#boolean] "For all ·atomic· datatypes other than
@@ -1094,7 +1093,7 @@ mod tests {
         }
     }
 
-    /// An element which expects a single attribute of arbitrary name and 
+    /// An element which expects a single attribute of arbitrary name and
     /// value type `T`.
     #[derive(Debug, Default, Eq, PartialEq)]
     struct AttrWrapper<T: DeserializeAttrField>(T);

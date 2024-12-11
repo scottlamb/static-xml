@@ -8,6 +8,7 @@ license = "MIT/Apache-2.0"
 keywords = ["serde", "xml", "serialization"]
 categories = ["encoding"]
 description = "derive macros for static-xml crate"
+rust-version = "1.58"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
